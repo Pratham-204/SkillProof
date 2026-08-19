@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+skillproof.db
+src/skillproof/data/skills_embeddings.npz
+.pytest_cache/
+.mypy_cache/
+.env
