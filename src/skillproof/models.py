@@ -44,7 +44,7 @@ class EvidenceCard(Base):
     error: Mapped[str | None] = mapped_column(String, nullable=True)
 
     confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
-    # "none" | "verified"
+    # "none" | "declared_only" | "verified"
     evidence_type: Mapped[str] = mapped_column(String, default="none")
     source_commits: Mapped[list] = mapped_column(JSON, default=list)
     temporal_span_days: Mapped[int] = mapped_column(Integer, default=0)

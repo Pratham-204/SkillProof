@@ -178,6 +178,7 @@ def test_search_returns_only_opted_in_candidates_sorted_by_score(client, fake_gi
     result_ids = [r["candidate_id"] for r in results]
     assert opted_in["candidate_id"] in result_ids
     assert opted_out["candidate_id"] not in result_ids
+    assert all(r["evidence_type"] for r in results)
 
     top_result = next(r for r in results if r["candidate_id"] == opted_in["candidate_id"])
     assert top_result["github_profile_url"] == "https://github.com/octodev"
@@ -187,6 +188,20 @@ def test_search_returns_only_opted_in_candidates_sorted_by_score(client, fake_gi
     # Opting out of search never breaks the direct Evidence Card link.
     direct = client.get(f"/evidence-card/{opted_out['candidate_id']}")
     assert direct.status_code == 200
+
+
+def test_verify_produces_declared_only_for_a_manifest_dependency_never_touched(client, fake_github):
+    """Django is declared in the fixture's requirements.txt but never touched by
+    any commit, proving the declared_only path (issue 02) end to end."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["Django"]})
+
+    card = client.get(f"/evidence-card/{candidate_id}").json()["cards"][0]
+    assert card["evidence_type"] == "declared_only"
+    assert 0 < card["confidence_score"] < 0.3
+    assert card["source_commits"] == []
 
 
 def test_search_is_rate_limited_per_ip(client, fake_github):

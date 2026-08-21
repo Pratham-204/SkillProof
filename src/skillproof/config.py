@@ -27,9 +27,6 @@ class Settings(BaseSettings):
     embedding_model_name: str = "all-MiniLM-L6-v2"
 
     evidence_qualifying_floor: float = 0.35
-    top_n_evidence: int = 5
-    temporal_full_credit_days: int = 90
-    temporal_min_multiplier: float = 0.7
 
     search_rate_limit: str = "60/minute"
     search_result_limit: int = 50

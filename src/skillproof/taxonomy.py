@@ -86,6 +86,18 @@ def list_skills() -> list[SkillTag]:
     return _raw_skills()
 
 
+@lru_cache
+def all_detection_pattern_config_files() -> frozenset[str]:
+    """The union of every Skill Tag's config-file Detection Pattern entries.
+
+    Used by ingestion to stop the docs/config-only commit filter from
+    discarding a file that is itself Detection Pattern evidence for *some*
+    Skill Tag (e.g. `docker-compose.yml` for Docker), even when that file's
+    extension would otherwise read as pure config noise.
+    """
+    return frozenset(cf for skill in _raw_skills() for cf in skill.detection_pattern.config_files)
+
+
 def is_known_skill(name: str) -> bool:
     return name in _skill_index()
 

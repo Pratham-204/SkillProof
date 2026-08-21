@@ -68,6 +68,7 @@ class SearchResultOut(BaseModel):
     github_profile_url: str
     evidence_card_url: str
     confidence_score: float
+    evidence_type: str
 
 
 class SearchResponse(BaseModel):

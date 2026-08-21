@@ -41,7 +41,7 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
 
         try:
             token = security.decrypt_token(candidate.github_token_encrypted)
-            evidence_items = ingest_evidence(github_client, token, candidate.github_login)
+            evidence_bundle = ingest_evidence(github_client, token, candidate.github_login)
         except GitHubAuthError:
             candidate.needs_reconnect = True
             for skill in skills:
@@ -58,7 +58,7 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
         candidate.needs_reconnect = False
 
         for skill in skills:
-            result = scoring.score_skill(evidence_items, skill)
+            result = scoring.score_skill(evidence_bundle, skill)
             card = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill=skill).one()
             card.status = "complete"
             card.error = None

@@ -17,6 +17,12 @@ QUALIFYING_REVIEW_COMMENT = (
     "logic into its own helper function so the main handler stays readable and the FastAPI "
     "route tests are easier to reason about."
 )
+QUALIFYING_DIFF_TEXT = (
+    "+from fastapi import FastAPI, Depends\n"
+    "+app = FastAPI()\n"
+    "+@app.post('/verify')\n"
+    "+async def verify(payload: VerifyRequest):\n"
+)
 LOW_EFFORT_COMMENT = "LGTM, thanks!"
 DOCS_ONLY_COMMIT_MESSAGE = (
     "Document the FastAPI verify endpoint usage in detail, explaining FastAPI dependency "
@@ -43,6 +49,10 @@ def wire_verified_candidate(fake_github: FakeGitHubClient, *, login: str, github
     fake_github.owned_repos[login] = [OWNED_REPO]
     fake_github.external_repos[login] = [EXTERNAL_REPO]
 
+    # Django is declared here but never touched by any commit below, proving
+    # the declared_only path (issue 02) alongside FastAPI's fully-verified one.
+    fake_github.manifest_files[OWNED_REPO.full_name] = {"requirements.txt": "Django==4.2\ngunicorn==21.2\n"}
+
     fake_github.commits[OWNED_REPO.full_name] = [
         CommitRecord(
             repo=OWNED_REPO,
@@ -50,7 +60,7 @@ def wire_verified_candidate(fake_github: FakeGitHubClient, *, login: str, github
             message=QUALIFYING_COMMIT_MESSAGE,
             date=_NOW - timedelta(days=120),
             files=["skillproof/verify.py", "tests/test_verify.py"],
-            diff_text="",
+            diff_text=QUALIFYING_DIFF_TEXT,
             url=f"https://github.com/{OWNED_REPO.full_name}/commit/c1",
         ),
         CommitRecord(
@@ -70,7 +80,7 @@ def wire_verified_candidate(fake_github: FakeGitHubClient, *, login: str, github
             message=QUALIFYING_COMMIT_MESSAGE,
             date=_NOW - timedelta(days=10),
             files=["app/verify.py"],
-            diff_text="",
+            diff_text=QUALIFYING_DIFF_TEXT,
             url=f"https://github.com/{EXTERNAL_REPO.full_name}/commit/e1",
         ),
     ]

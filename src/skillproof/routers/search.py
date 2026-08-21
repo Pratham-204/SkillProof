@@ -39,6 +39,7 @@ def search(request: Request, skill: str, min_score: float = 0.0, db: Session = D
             github_profile_url=f"https://github.com/{candidate.github_login}",
             evidence_card_url=f"{str(request.base_url).rstrip('/')}/evidence-card/{candidate.candidate_id}",
             confidence_score=card.confidence_score,
+            evidence_type=card.evidence_type,
         )
         for candidate, card in rows
     ]

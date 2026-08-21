@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -9,6 +10,31 @@ from urllib.parse import urlparse
 import httpx
 
 from skillproof.config import get_settings
+
+# The well-known dependency-manifest filenames Presence checks against,
+# fetched once per repo (issue 02) rather than once per claimed skill.
+MANIFEST_FILENAMES = (
+    "package.json",
+    "requirements.txt",
+    "pyproject.toml",
+    "setup.py",
+    "Pipfile",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Cargo.toml",
+    "Gemfile",
+    "composer.json",
+    "mix.exs",
+    "pubspec.yaml",
+    "Package.swift",
+    "project.clj",
+    "deps.edn",
+    "rebar.config",
+    "stack.yaml",
+    "Project.toml",
+)
 
 
 class GitHubAuthError(Exception):
@@ -76,6 +102,12 @@ class GitHubClient(ABC):
 
     @abstractmethod
     def list_pr_review_comments(self, token: str, repo: Repo, author_login: str) -> list[PrCommentRecord]: ...
+
+    @abstractmethod
+    def get_manifest_files(self, token: str, repo: Repo) -> dict[str, str]:
+        """Contents of whichever `MANIFEST_FILENAMES` exist in `repo`'s default branch,
+        keyed by filename. Missing files are simply absent from the result, not an error."""
+        ...
 
 
 class RealGitHubClient(GitHubClient):
@@ -167,6 +199,20 @@ class RealGitHubClient(GitHubClient):
             if c.get("user", {}).get("login", "").lower() == author_login.lower()
         ]
 
+    def get_manifest_files(self, token: str, repo: Repo) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for filename in MANIFEST_FILENAMES:
+            try:
+                data = self._get_json(token, f"/repos/{repo.full_name}/contents/{filename}")
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    continue
+                raise
+            content = data.get("content") if isinstance(data, dict) else None
+            if content:
+                result[filename] = base64.b64decode(content).decode("utf-8", errors="replace")
+        return result
+
     def _get_json(self, token: str, path: str, params: dict | None = None, max_retries: int = 5):
         url = f"https://api.github.com{path}"
         cache_key = f"{url}?{params}"
@@ -231,6 +277,7 @@ class FakeGitHubClient(GitHubClient):
     external_repos: dict[str, list[Repo]] = field(default_factory=dict)
     commits: dict[str, list[CommitRecord]] = field(default_factory=dict)
     pr_comments: dict[str, list[PrCommentRecord]] = field(default_factory=dict)
+    manifest_files: dict[str, dict[str, str]] = field(default_factory=dict)
     revoked_tokens: set[str] = field(default_factory=set)
 
     def exchange_code_for_token(self, code: str) -> str:
@@ -258,6 +305,10 @@ class FakeGitHubClient(GitHubClient):
     def list_pr_review_comments(self, token: str, repo: Repo, author_login: str) -> list[PrCommentRecord]:
         self._check_token(token)
         return self.pr_comments.get(repo.full_name, [])
+
+    def get_manifest_files(self, token: str, repo: Repo) -> dict[str, str]:
+        self._check_token(token)
+        return self.manifest_files.get(repo.full_name, {})
 
     def _check_token(self, token: str) -> None:
         if token in self.revoked_tokens:
