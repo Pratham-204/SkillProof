@@ -35,6 +35,18 @@ def test_verify_rejects_unknown_skill_tag(client, fake_github):
     assert response.status_code == 400
 
 
+def test_verify_rejects_skill_removed_from_taxonomy(client, fake_github):
+    """System design has no authorable Detection Pattern (ticket 01) and was
+    removed from the taxonomy; it must be rejected the same way an unknown
+    skill is, with no separate rejection path."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate = _connect(client)
+
+    response = client.post("/verify", json={"candidate_id": candidate["candidate_id"], "skills": ["System design"]})
+
+    assert response.status_code == 400
+
+
 def test_verify_scores_qualifying_evidence_and_excludes_low_signal(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate = _connect(client)
