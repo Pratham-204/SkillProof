@@ -5,8 +5,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import skillproof.models  # noqa: F401 - registers tables on Base.metadata
+from skillproof import embeddings, taxonomy
 from skillproof.db import Base, get_db
 from skillproof.deps import get_github_client, get_groq_client, get_session_factory
+from skillproof.embeddings import FakeEmbeddingsBackend, SentenceTransformerBackend
 from skillproof.github_client import FakeGitHubClient
 from skillproof.groq_client import FakeGroqClient
 from skillproof.limiter import limiter
@@ -33,6 +35,20 @@ def fake_github():
 @pytest.fixture
 def fake_groq():
     return FakeGroqClient()
+
+
+@pytest.fixture
+def fake_embeddings():
+    """Installs a FakeEmbeddingsBackend and clears taxonomy's embeddings cache so
+    skill-tag vectors are recomputed through it instead of served from the real,
+    disk-cached ones. Restores the real backend on teardown so later tests
+    aren't left running against fakes."""
+    fake = FakeEmbeddingsBackend()
+    embeddings.set_backend(fake)
+    taxonomy._embeddings_cache.cache_clear()
+    yield fake
+    embeddings.set_backend(SentenceTransformerBackend())
+    taxonomy._embeddings_cache.cache_clear()
 
 
 @pytest.fixture

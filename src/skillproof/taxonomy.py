@@ -121,19 +121,24 @@ def _embeddings_cache() -> dict[str, np.ndarray]:
     Recomputing per-request would be wasteful; a stale cache (taxonomy
     edited since the cache was written) is detected by comparing the
     cached skill names against the current taxonomy and recomputed.
+
+    The disk cache holds real-model vectors only — both reading and writing it
+    are skipped whenever a non-real embeddings backend is installed, so a test
+    backend's vectors never leak into the checked-in cache file.
     """
     skills = _raw_skills()
     names = [s.name for s in skills]
 
-    if EMBEDDINGS_CACHE_PATH.exists():
+    if embeddings.using_real_backend() and EMBEDDINGS_CACHE_PATH.exists():
         cached = np.load(EMBEDDINGS_CACHE_PATH, allow_pickle=False)
         cached_names = list(cached["names"])
         if cached_names == names:
             return {name: cached[f"vec_{i}"] for i, name in enumerate(names)}
 
     vectors = embeddings.embed_batch([f"{s.name}: {s.description}" for s in skills])
-    save_kwargs = {f"vec_{i}": vectors[i] for i in range(len(names))}
-    np.savez(EMBEDDINGS_CACHE_PATH, names=np.array(names), **save_kwargs)
+    if embeddings.using_real_backend():
+        save_kwargs = {f"vec_{i}": vectors[i] for i in range(len(names))}
+        np.savez(EMBEDDINGS_CACHE_PATH, names=np.array(names), **save_kwargs)
     return dict(zip(names, vectors))
 
 

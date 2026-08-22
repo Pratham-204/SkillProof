@@ -1,11 +1,19 @@
 """Focused tests for the hybrid Presence/Volume/Depth/Span formula (ADR-0004):
-pure computation over an EvidenceBundle, no external systems, so nothing here
-needs faking. Embeddings run for real, same as the HTTP-level suite.
+pure computation over an EvidenceBundle, no external systems to fake for most
+of it. The tests below this module's docstring run embeddings for real,
+same as the HTTP-level suite, calibrated against the live model's actual
+output. The tests at the bottom instead use the fake_embeddings fixture to pin
+exact expected similarities — useful for Depth-specific edge cases (the
+qualifying floor, the discount) where an exact number is easier to state and
+more robust than calibrated prose that happens to land on the right side of a
+threshold today.
 """
 
 from datetime import datetime, timedelta, timezone
 
-from skillproof import scoring
+import numpy as np
+
+from skillproof import scoring, taxonomy
 from skillproof.ingestion import EvidenceBundle, EvidenceItem
 from tests.fixtures.github_fixtures import QUALIFYING_COMMIT_MESSAGE, QUALIFYING_DIFF_TEXT, QUALIFYING_REVIEW_COMMENT
 
@@ -167,3 +175,94 @@ def test_none_when_neither_declared_nor_touched():
     assert result.evidence_type == "none"
     assert result.confidence_score == 0.0
     assert result.source_commits == []
+
+
+# --- Fake-backend tests ---
+# Depth-specific edge cases below pin an exact expected similarity rather than
+# relying on prose hand-calibrated against the real model's actual output.
+
+
+def _skill_embedding_key(skill: str) -> str:
+    return f"{skill}: {taxonomy.get_skill(skill).description}"
+
+
+def _unit_vector_at_cosine(cos_theta: float) -> np.ndarray:
+    """A 2D unit vector whose cosine similarity to [1, 0] is exactly cos_theta."""
+    return np.array([cos_theta, (1 - cos_theta**2) ** 0.5])
+
+
+def test_fake_backend_precisely_excludes_similarity_just_below_the_qualifying_floor(fake_embeddings):
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text["just below the floor"] = _unit_vector_at_cosine(0.34)
+    items = [
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref="c1",
+            url="https://example.com/c1",
+            text="just below the floor",
+            date=_NOW,
+            diff_text=QUALIFYING_DIFF_TEXT,  # matches the Detection Pattern regardless of embedding similarity
+        )
+    ]
+    bundle = EvidenceBundle(items=items, manifests={})
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    assert result.evidence_type == "verified"  # Volume-qualifying (diff matched), just not Depth-qualifying
+    assert result.source_commits == []
+    assert result.temporal_span_days == 0
+
+
+def test_fake_backend_precisely_includes_similarity_just_above_the_qualifying_floor(fake_embeddings):
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text["just above the floor"] = _unit_vector_at_cosine(0.36)
+    items = [
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref="c1",
+            url="https://example.com/c1",
+            text="just above the floor",
+            date=_NOW,
+            diff_text=QUALIFYING_DIFF_TEXT,
+        )
+    ]
+    bundle = EvidenceBundle(items=items, manifests={})
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    assert len(result.source_commits) == 1
+    assert result.source_commits[0].similarity == round(0.36 * scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT, 4)
+
+
+def test_fake_backend_pins_the_exact_discount_on_commit_message_depth(fake_embeddings):
+    text = "uses fastapi for the api layer"
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text[text] = np.array([1.0, 0.0])  # cosine similarity to the skill vector: exactly 1.0
+    items = [
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref="c1",
+            url="https://example.com/c1",
+            text=text,
+            date=_NOW,
+            diff_text=QUALIFYING_DIFF_TEXT,
+        ),
+        EvidenceItem(
+            kind="pr_comment",
+            repo="octodev/skillproof-lib",
+            ref="p1",
+            url="https://example.com/p1",
+            text=text,
+            date=_NOW,
+        ),
+    ]
+    bundle = EvidenceBundle(items=items, manifests={})
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    by_kind = {ref.kind: ref.similarity for ref in result.source_commits}
+    assert by_kind["pr_comment"] == 1.0
+    assert by_kind["commit"] == scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT == 0.6
