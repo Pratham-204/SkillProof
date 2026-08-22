@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from skillproof import embeddings, heuristics, taxonomy
+from skillproof import embeddings, taxonomy
 from skillproof.config import get_settings
 from skillproof.ingestion import EvidenceBundle, EvidenceItem
 from skillproof.taxonomy import DetectionPattern
@@ -18,10 +18,9 @@ VOLUME_SATURATION_CONSTANT = 5  # volume = n_commits / (n_commits + this)
 SPAN_SATURATION_DAYS = 90  # span = span_days / (span_days + this)
 DEPTH_TOP_N = 3
 
-# A commit message is the Candidate's own free-form prose, easy to embellish on
-# a trivial change; a PR review comment is written/read by someone else and is
-# meaningfully harder to game. Discounting it keeps Depth from being inflatable
-# just by writing an elaborate commit message (hybrid-scoring ticket 03, ADR-0004).
+# Applied to EvidenceItem.is_self_authored items (see its docstring for why) so
+# Depth isn't inflatable just by writing an elaborate commit message
+# (hybrid-scoring ticket 03, ADR-0004).
 DEPTH_COMMIT_MESSAGE_DISCOUNT = 0.6
 
 
@@ -54,7 +53,7 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
     pattern = taxonomy.get_skill(skill).detection_pattern
     target_vector = taxonomy.skill_embedding(skill)
 
-    matching_items = [item for item in bundle.items if _matches_pattern(item, pattern)]
+    matching_items = [item for item in bundle.items if item.matches(pattern)]
     n_commits = sum(1 for item in matching_items if item.kind == "commit")
     volume = n_commits / (n_commits + VOLUME_SATURATION_CONSTANT)
 
@@ -76,7 +75,7 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
         raw_similarity = embeddings.cosine_similarity(embeddings.embed(item.text), target_vector)
         if raw_similarity < settings.evidence_qualifying_floor:
             continue
-        depth_similarity = raw_similarity * DEPTH_COMMIT_MESSAGE_DISCOUNT if item.kind == "commit" else raw_similarity
+        depth_similarity = raw_similarity * DEPTH_COMMIT_MESSAGE_DISCOUNT if item.is_self_authored else raw_similarity
         qualifying.append((item, depth_similarity))
 
     depth = 0.0
@@ -108,30 +107,6 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
         source_commits=source_commits,
         temporal_span_days=span_days,
     )
-
-
-def _matches_pattern(item: EvidenceItem, pattern: DetectionPattern) -> bool:
-    """A commit matches via its changed files or its own diff content — never its
-    message, which is freely candidate-authored prose, not evidence of code touched.
-    A PR comment (no diff of its own) can only match via its body text."""
-    if item.kind == "commit":
-        if any(_file_matches(f, pattern) for f in item.files):
-            return True
-        return _text_matches(item.diff_text, pattern)
-    return _text_matches(item.text, pattern)
-
-
-def _file_matches(path: str, pattern: DetectionPattern) -> bool:
-    if any(path.lower().endswith(ext.lower()) for ext in pattern.file_extensions):
-        return True
-    return heuristics.matches_any_filename(path, pattern.config_files)
-
-
-def _text_matches(text: str, pattern: DetectionPattern) -> bool:
-    lower = text.lower()
-    if any(marker.lower() in lower for marker in pattern.content_markers):
-        return True
-    return any(pkg.name.lower() in lower for pkg in pattern.manifest_packages)
 
 
 def _manifest_declares(manifests: dict[str, dict[str, str]], pattern: DetectionPattern) -> bool:

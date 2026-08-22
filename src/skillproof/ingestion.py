@@ -6,6 +6,7 @@ from datetime import datetime
 
 from skillproof import heuristics, taxonomy
 from skillproof.github_client import CommitRecord, GitHubClient, PrCommentRecord, Repo
+from skillproof.taxonomy import DetectionPattern
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,38 @@ class EvidenceItem:
     date: datetime
     files: tuple[str, ...] = ()  # changed file paths; empty for pr_comment items
     diff_text: str = ""  # commit diff content, matched against Volume/Presence content markers; empty for pr_comment
+
+    def matches(self, pattern: DetectionPattern) -> bool:
+        """A commit matches via its changed files or its own diff content — never
+        its message, which is freely candidate-authored prose, not evidence of
+        code touched. A PR comment (no diff of its own) can only match via its
+        body text. The one place that states what "matching" means per kind."""
+        if self.kind == "commit":
+            if any(_file_matches(f, pattern) for f in self.files):
+                return True
+            return _text_matches(self.diff_text, pattern)
+        return _text_matches(self.text, pattern)
+
+    @property
+    def is_self_authored(self) -> bool:
+        """True for a commit message — written solely by the Candidate, so easy
+        to embellish on a trivial change. False for a PR review comment, which
+        someone else engaged with and is meaningfully harder to game. Scoring's
+        Depth discount keys off this."""
+        return self.kind == "commit"
+
+
+def _file_matches(path: str, pattern: DetectionPattern) -> bool:
+    if any(path.lower().endswith(ext.lower()) for ext in pattern.file_extensions):
+        return True
+    return heuristics.matches_any_filename(path, pattern.config_files)
+
+
+def _text_matches(text: str, pattern: DetectionPattern) -> bool:
+    lower = text.lower()
+    if any(marker.lower() in lower for marker in pattern.content_markers):
+        return True
+    return any(pkg.name.lower() in lower for pkg in pattern.manifest_packages)
 
 
 @dataclass(frozen=True)
