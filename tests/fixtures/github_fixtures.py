@@ -95,8 +95,9 @@ def wire_verified_candidate(fake_github: FakeGitHubClient, *, login: str, github
     # Author-matching but NOT part of the merged PR above: proves the
     # fork-and-fake defense (hybrid-scoring ticket 03) — a blanket author-filtered scan of
     # cool-project's history would have picked this up, PR-scoping doesn't.
-    # `list_commits` is never called for external repos, so this is unreachable
-    # by the real ingestion path; it's here purely as a regression trap.
+    # list_qualifying_commits only reads external-repo commits via pr_commits
+    # (per merged PR), never this dict for a non-owned repo, so this entry is
+    # excluded by construction — see test_github_client.py for the direct proof.
     fake_github.commits[EXTERNAL_REPO.full_name] = [
         CommitRecord(
             repo=EXTERNAL_REPO,

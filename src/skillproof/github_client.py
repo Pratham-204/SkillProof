@@ -113,20 +113,44 @@ class GitHubClient(ABC):
         ...
 
     @abstractmethod
-    def list_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]: ...
-
-    @abstractmethod
-    def list_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
-        """Commits belonging to one specific (merged) PR, for external-repo Volume scoping (hybrid-scoring ticket 03)."""
-        ...
-
-    @abstractmethod
     def list_pr_review_comments(self, token: str, repo: Repo, author_login: str) -> list[PrCommentRecord]: ...
 
     @abstractmethod
     def get_manifest_files(self, token: str, repo: Repo) -> dict[str, str]:
         """Contents of whichever `MANIFEST_FILENAMES` exist in `repo`'s default branch,
         keyed by filename. Missing files are simply absent from the result, not an error."""
+        ...
+
+    def list_qualifying_commits(self, token: str, login: str) -> list[CommitRecord]:
+        """The Candidate's Volume-qualifying commits (ADR-0004): every author-matching
+        commit in their owned, non-fork repos, plus — for repos they don't own — only
+        commits that are part of a PR they actually opened and had merged there. This
+        orchestration (which repos are owned vs. external, and which fetch strategy
+        applies to each) lives here, once, rather than in the caller or duplicated per
+        adapter, so there's no method left to call that would let an external repo's
+        unscoped commit history count. Adapters only implement the two fetch hooks below.
+        """
+        owned_repos = self.list_owned_public_repos(token, login)
+        merged_prs = self.list_merged_prs(token, login)
+
+        commits: list[CommitRecord] = []
+        seen: set[tuple[str, str]] = set()
+        for repo in owned_repos:
+            for commit in self._fetch_owned_commits(token, repo, login):
+                _append_unique(commits, seen, commit)
+        for pr in merged_prs:
+            for commit in self._fetch_pr_commits(token, pr.repo, pr.number):
+                _append_unique(commits, seen, commit)
+        return commits
+
+    @abstractmethod
+    def _fetch_owned_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
+        """Every author-matching commit in one owned, non-fork repo."""
+        ...
+
+    @abstractmethod
+    def _fetch_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
+        """Commits belonging to one specific (merged) PR, for external-repo Volume scoping."""
         ...
 
 
@@ -181,7 +205,7 @@ class RealGitHubClient(GitHubClient):
             results.append(MergedPullRequest(repo=Repo(owner=owner, name=name, fork=False), number=item["number"]))
         return results
 
-    def list_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
+    def _fetch_owned_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
         commits = self._get_json(
             token,
             f"/repos/{repo.full_name}/commits",
@@ -189,7 +213,7 @@ class RealGitHubClient(GitHubClient):
         )
         return [self._commit_record(token, repo, c["sha"]) for c in commits]
 
-    def list_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
+    def _fetch_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
         commits = self._get_json(token, f"/repos/{repo.full_name}/pulls/{pr_number}/commits", params={"per_page": 100})
         return [self._commit_record(token, repo, c["sha"]) for c in commits]
 
@@ -262,6 +286,16 @@ class RealGitHubClient(GitHubClient):
             return body
 
 
+def _append_unique(commits: list[CommitRecord], seen: set[tuple[str, str]], commit: CommitRecord) -> None:
+    """A commit can appear in more than one of a Candidate's merged PRs in the same
+    repo (e.g. a shared base commit) — it must only count once toward Volume."""
+    key = (commit.repo.full_name, commit.sha)
+    if key in seen:
+        return
+    seen.add(key)
+    commits.append(commit)
+
+
 def _is_secondary_rate_limit(response: httpx.Response) -> bool:
     if response.headers.get("Retry-After"):
         return True
@@ -321,11 +355,11 @@ class FakeGitHubClient(GitHubClient):
         self._check_token(token)
         return self.merged_prs.get(login, [])
 
-    def list_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
+    def _fetch_owned_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
         self._check_token(token)
         return self.commits.get(repo.full_name, [])
 
-    def list_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
+    def _fetch_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
         self._check_token(token)
         return self.pr_commits.get((repo.full_name, pr_number), [])
 
