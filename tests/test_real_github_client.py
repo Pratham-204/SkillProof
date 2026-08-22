@@ -1,7 +1,7 @@
-"""Deepening (architecture review candidate 2): RealGitHubClient previously had
-zero test coverage and no pagination handling despite every list-fetching call
-passing per_page=100 — a Candidate with more than 100 commits/PRs/comments in
-one repo had Volume (the highest-weighted signal) silently truncated at page 1.
+"""RealGitHubClient previously had zero test coverage and no pagination
+handling despite every list-fetching call passing per_page=100 — a Candidate
+with more than 100 commits/PRs/comments in one repo had Volume (the
+highest-weighted signal) silently truncated at page 1.
 
 RealGitHubClient now accepts an injectable httpx transport (defaulting to a
 real network transport), so these tests drive it directly with
