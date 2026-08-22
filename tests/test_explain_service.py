@@ -1,0 +1,144 @@
+"""Direct unit tests for explain_service.py — pure functions over an
+EvidenceCard, previously only exercised indirectly through /explain in
+test_api_flow.py (which only reaches two of the possible template_fallback
+shapes: zero evidence, and commits + a PR comment together).
+"""
+
+from skillproof.explain_service import build_prompt, generate_explanation, template_fallback
+from skillproof.groq_client import FakeGroqClient
+from skillproof.models import EvidenceCard
+
+
+def _card(**overrides) -> EvidenceCard:
+    """Builds a bare EvidenceCard with no DB session. mapped_column(default=...)
+    only applies at flush/INSERT, not at plain construction, so every column not
+    listed here (status, evidence_type, etc.) is None rather than its declared
+    default — fine only because build_prompt/template_fallback/generate_explanation
+    never read those columns."""
+    defaults = dict(
+        skill="FastAPI",
+        confidence_score=0.72,
+        source_commits=[],
+        temporal_span_days=0,
+    )
+    return EvidenceCard(**{**defaults, **overrides})
+
+
+def test_build_prompt_includes_skill_and_score():
+    card = _card(skill="Rust", confidence_score=0.5)
+
+    prompt = build_prompt(card)
+
+    assert "Rust" in prompt
+    assert "0.5" in prompt
+
+
+def test_build_prompt_lists_each_qualifying_item():
+    card = _card(
+        source_commits=[
+            {"kind": "commit", "repo": "octodev/lib", "ref": "c1", "url": "https://x/c1", "similarity": 0.9},
+            {"kind": "pr_comment", "repo": "octodev/lib", "ref": "p1", "url": "https://x/p1", "similarity": 0.8},
+        ]
+    )
+
+    prompt = build_prompt(card)
+
+    assert "(commit) octodev/lib: similarity 0.9" in prompt
+    assert "(pr_comment) octodev/lib: similarity 0.8" in prompt
+
+
+def test_build_prompt_states_none_when_no_qualifying_evidence():
+    card = _card(source_commits=[])
+
+    assert "(none)" in build_prompt(card)
+
+
+def test_template_fallback_with_no_evidence():
+    card = _card(source_commits=[])
+
+    text = template_fallback(card)
+
+    assert "No qualifying GitHub evidence was found for FastAPI" in text
+    assert "0" in text
+
+
+def test_template_fallback_pluralizes_singular_commit_correctly():
+    card = _card(
+        source_commits=[
+            {"kind": "commit", "repo": "octodev/lib", "ref": "c1", "url": "https://x/c1", "similarity": 0.9},
+        ],
+        temporal_span_days=1,
+    )
+
+    text = template_fallback(card)
+
+    assert "1 commit " in text
+    assert "commits" not in text
+    assert "1 day" in text
+    assert "days" not in text
+
+
+def test_template_fallback_pluralizes_multiple_commits_and_reviews():
+    card = _card(
+        source_commits=[
+            {"kind": "commit", "repo": "octodev/lib", "ref": "c1", "url": "https://x/c1", "similarity": 0.9},
+            {"kind": "commit", "repo": "octodev/lib", "ref": "c2", "url": "https://x/c2", "similarity": 0.8},
+            {"kind": "pr_comment", "repo": "someorg/proj", "ref": "p1", "url": "https://x/p1", "similarity": 0.7},
+        ],
+        temporal_span_days=45,
+    )
+
+    text = template_fallback(card)
+
+    assert "2 commits" in text
+    assert "1 pr review comment" in text  # evidence_desc.capitalize() lowercases the rest
+    assert "2 repos" in text  # octodev/lib and someorg/proj
+    assert "45 days" in text
+
+
+def test_template_fallback_with_only_commits_omits_review_comment_phrase():
+    card = _card(
+        source_commits=[
+            {"kind": "commit", "repo": "octodev/lib", "ref": "c1", "url": "https://x/c1", "similarity": 0.9},
+        ],
+        temporal_span_days=1,
+    )
+
+    text = template_fallback(card)
+
+    assert "1 commit" in text
+    assert "review comment" not in text
+
+
+def test_template_fallback_with_only_reviews_omits_commit_phrase():
+    card = _card(
+        source_commits=[
+            {"kind": "pr_comment", "repo": "octodev/lib", "ref": "p1", "url": "https://x/p1", "similarity": 0.9},
+        ],
+        temporal_span_days=1,
+    )
+
+    text = template_fallback(card)
+
+    assert "1 pr review comment" in text
+    assert "commit" not in text
+
+
+def test_generate_explanation_returns_groq_response_when_it_succeeds():
+    card = _card()
+    groq = FakeGroqClient(canned_response="A real explanation.")
+
+    text, is_fallback = generate_explanation(card, groq)
+
+    assert text == "A real explanation."
+    assert is_fallback is False
+
+
+def test_generate_explanation_falls_back_to_template_when_groq_is_unavailable():
+    card = _card(source_commits=[])
+    groq = FakeGroqClient(should_fail=True)
+
+    text, is_fallback = generate_explanation(card, groq)
+
+    assert is_fallback is True
+    assert text == template_fallback(card)
