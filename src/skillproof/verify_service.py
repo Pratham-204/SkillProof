@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 from sqlalchemy.orm import Session
 
-from skillproof import scoring, security
+from skillproof import scoring, security, taxonomy
 from skillproof.github_client import GitHubAuthError, GitHubClient
 from skillproof.ingestion import ingest_evidence
 from skillproof.models import Candidate, EvidenceCard
@@ -16,11 +16,22 @@ logger = logging.getLogger(__name__)
 def start_verification(db: Session, candidate: Candidate, skills: list[str]) -> None:
     """Resets/creates EvidenceCard rows to 'processing' synchronously, before the
     background task runs, so a poll right after POST /verify sees "processing".
+
+    A re-verify under the same taxonomy_version as the candidate's existing card for
+    that skill overwrites it in place, exactly as before. A re-verify under a newer
+    taxonomy_version forks a new card instead of mutating the old one (ADR-0005), so
+    the old card stays traceable to the taxonomy it was actually scored under.
     """
+    current_version = taxonomy.taxonomy_version()
     for skill in skills:
-        card = db.query(EvidenceCard).filter_by(candidate_id=candidate.candidate_id, skill=skill).one_or_none()
-        if card is None:
-            card = EvidenceCard(candidate_id=candidate.candidate_id, skill=skill)
+        card = (
+            db.query(EvidenceCard)
+            .filter_by(candidate_id=candidate.candidate_id, skill=skill)
+            .order_by(EvidenceCard.taxonomy_version.desc())
+            .first()
+        )
+        if card is None or card.taxonomy_version != current_version:
+            card = EvidenceCard(candidate_id=candidate.candidate_id, skill=skill, taxonomy_version=current_version)
             db.add(card)
         card.status = "processing"
         card.error = None
@@ -39,19 +50,24 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
         if candidate is None:
             return
 
+        # The exact version start_verification stamped the "processing" rows with,
+        # so this job updates the same rows it was launched for even if the
+        # taxonomy is bumped again while this job is still running.
+        current_version = taxonomy.taxonomy_version()
+
         try:
             token = security.decrypt_token(candidate.github_token_encrypted)
             evidence_bundle = ingest_evidence(github_client, token, candidate.github_login)
         except GitHubAuthError:
             candidate.needs_reconnect = True
             for skill in skills:
-                _fail_card(db, candidate_id, skill, "GitHub token was revoked; reconnect required")
+                _fail_card(db, candidate_id, skill, current_version, "GitHub token was revoked; reconnect required")
             db.commit()
             return
         except Exception as exc:  # pragma: no cover - defensive, unexpected ingestion failure
             logger.exception("Evidence ingestion failed for candidate %s", candidate_id)
             for skill in skills:
-                _fail_card(db, candidate_id, skill, f"Verification failed: {exc}")
+                _fail_card(db, candidate_id, skill, current_version, f"Verification failed: {exc}")
             db.commit()
             return
 
@@ -59,7 +75,11 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
 
         for skill in skills:
             result = scoring.score_skill(evidence_bundle, skill)
-            card = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill=skill).one()
+            card = (
+                db.query(EvidenceCard)
+                .filter_by(candidate_id=candidate_id, skill=skill, taxonomy_version=current_version)
+                .one()
+            )
             card.status = "complete"
             card.error = None
             card.confidence_score = result.confidence_score
@@ -76,7 +96,11 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
         db.close()
 
 
-def _fail_card(db: Session, candidate_id: str, skill: str, error: str) -> None:
-    card = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill=skill).one()
+def _fail_card(db: Session, candidate_id: str, skill: str, taxonomy_version: int, error: str) -> None:
+    card = (
+        db.query(EvidenceCard)
+        .filter_by(candidate_id=candidate_id, skill=skill, taxonomy_version=taxonomy_version)
+        .one()
+    )
     card.status = "failed"
     card.error = error

@@ -18,7 +18,14 @@ def explain(
     db: Session = Depends(get_db),
     groq_client: GroqClient = Depends(get_groq_client),
 ) -> ExplainOut:
-    card = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill=skill).one_or_none()
+    # A skill can have more than one card across taxonomy_versions (ADR-0005);
+    # explanations are only generated for the latest one.
+    card = (
+        db.query(EvidenceCard)
+        .filter_by(candidate_id=candidate_id, skill=skill)
+        .order_by(EvidenceCard.taxonomy_version.desc())
+        .first()
+    )
     if card is None:
         raise HTTPException(status_code=404, detail="No Evidence Card exists for this candidate + skill")
     if card.status != "complete":

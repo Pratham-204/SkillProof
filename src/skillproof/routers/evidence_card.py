@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from skillproof.db import get_db
@@ -14,7 +15,26 @@ def get_evidence_card(candidate_id: str, db: Session = Depends(get_db)) -> Candi
     if candidate is None:
         raise HTTPException(status_code=404, detail="Unknown candidate_id")
 
-    cards = db.query(EvidenceCard).filter_by(candidate_id=candidate_id).order_by(EvidenceCard.skill).all()
+    # A re-verify under a bumped taxonomy_version forks a new card rather than
+    # mutating the old one (ADR-0005), so a skill can have more than one row here;
+    # this endpoint surfaces only the latest taxonomy_version per skill by default.
+    latest_per_skill = (
+        db.query(EvidenceCard.skill, func.max(EvidenceCard.taxonomy_version).label("taxonomy_version"))
+        .filter_by(candidate_id=candidate_id)
+        .group_by(EvidenceCard.skill)
+        .subquery()
+    )
+    cards = (
+        db.query(EvidenceCard)
+        .join(
+            latest_per_skill,
+            (EvidenceCard.skill == latest_per_skill.c.skill)
+            & (EvidenceCard.taxonomy_version == latest_per_skill.c.taxonomy_version),
+        )
+        .filter(EvidenceCard.candidate_id == candidate_id)
+        .order_by(EvidenceCard.skill)
+        .all()
+    )
 
     return CandidateEvidenceOut(
         **CandidateOut.model_validate(candidate).model_dump(),
@@ -27,6 +47,7 @@ def get_evidence_card(candidate_id: str, db: Session = Depends(get_db)) -> Candi
                 evidence_type=c.evidence_type,
                 source_commits=[EvidenceRefOut(**ref) for ref in c.source_commits],
                 temporal_span_days=c.temporal_span_days,
+                taxonomy_version=c.taxonomy_version,
                 explanation=c.explanation,
                 explanation_is_fallback=c.explanation_is_fallback,
             )

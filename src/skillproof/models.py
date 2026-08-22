@@ -33,11 +33,17 @@ class Candidate(Base):
 
 class EvidenceCard(Base):
     __tablename__ = "evidence_cards"
-    __table_args__ = (UniqueConstraint("candidate_id", "skill", name="uq_candidate_skill"),)
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "skill", "taxonomy_version", name="uq_candidate_skill_taxonomy_version"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.candidate_id"), index=True)
     skill: Mapped[str] = mapped_column(String, index=True)
+    # The taxonomy_version this card was scored under (ADR-0005). A re-verify under the
+    # same version overwrites this row in place; a re-verify under a newer version forks
+    # a new row instead of mutating this one.
+    taxonomy_version: Mapped[int] = mapped_column(Integer)
 
     # "processing" | "complete" | "failed"
     status: Mapped[str] = mapped_column(String, default="processing")

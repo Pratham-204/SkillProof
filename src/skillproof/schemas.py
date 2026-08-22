@@ -44,6 +44,7 @@ class EvidenceCardOut(BaseModel):
     evidence_type: str
     source_commits: list[EvidenceRefOut]
     temporal_span_days: int
+    taxonomy_version: int
     explanation: str | None = None
     explanation_is_fallback: bool = False
 

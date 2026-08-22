@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from skillproof.config import get_settings
@@ -18,9 +18,25 @@ def search(request: Request, skill: str, min_score: float = 0.0, db: Session = D
     enforced by the SlowAPI middleware wired in main.py.
     """
     settings = get_settings()
+
+    # A candidate can have more than one card for this skill across taxonomy_versions
+    # (ADR-0005/ticket 04); without this, a re-verify under a bumped taxonomy_version
+    # would surface the same candidate twice here under two different scores.
+    latest_per_candidate = (
+        db.query(EvidenceCard.candidate_id, func.max(EvidenceCard.taxonomy_version).label("taxonomy_version"))
+        .filter(EvidenceCard.skill == skill)
+        .group_by(EvidenceCard.candidate_id)
+        .subquery()
+    )
+
     rows = (
         db.query(Candidate, EvidenceCard)
         .join(EvidenceCard, EvidenceCard.candidate_id == Candidate.candidate_id)
+        .join(
+            latest_per_candidate,
+            (EvidenceCard.candidate_id == latest_per_candidate.c.candidate_id)
+            & (EvidenceCard.taxonomy_version == latest_per_candidate.c.taxonomy_version),
+        )
         .filter(
             Candidate.searchable.is_(True),
             EvidenceCard.skill == skill,

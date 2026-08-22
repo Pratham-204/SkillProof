@@ -3,8 +3,8 @@ spec's testing decisions: one seam at the FastAPI boundary, GitHub and Groq
 faked with fixture/canned data, embeddings and scoring run for real.
 """
 
-from skillproof import verify_service
-from skillproof.models import Candidate
+from skillproof import taxonomy, verify_service
+from skillproof.models import Candidate, EvidenceCard
 from tests.fixtures.github_fixtures import wire_verified_candidate
 
 
@@ -130,6 +130,38 @@ def test_reverify_overwrites_existing_card_in_place(client, fake_github):
 
     assert len(second) == 1  # overwritten in place, not duplicated
     assert second[0]["confidence_score"] == first[0]["confidence_score"]
+    assert second[0]["taxonomy_version"] == taxonomy.taxonomy_version()
+
+
+def test_reverify_under_bumped_taxonomy_version_forks_a_new_card(client, fake_github, db_session_factory, monkeypatch):
+    """A re-verify under an unchanged taxonomy_version overwrites in place (see above);
+    one under a newer taxonomy_version must fork instead, so the old card stays
+    traceable to the taxonomy it was actually scored under (ADR-0005/ticket 04)."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+    original_version = taxonomy.taxonomy_version()
+
+    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    first = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
+    assert len(first) == 1
+    assert first[0]["taxonomy_version"] == original_version
+
+    monkeypatch.setattr(taxonomy, "taxonomy_version", lambda: original_version + 1)
+
+    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    second = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
+
+    # GET returns only the latest taxonomy_version per skill by default.
+    assert len(second) == 1
+    assert second[0]["taxonomy_version"] == original_version + 1
+
+    db = db_session_factory()
+    try:
+        rows = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill="FastAPI").all()
+        assert len(rows) == 2  # old card forked off, not mutated
+        assert {r.taxonomy_version for r in rows} == {original_version, original_version + 1}
+    finally:
+        db.close()
 
 
 def test_verify_with_revoked_token_prompts_reconnect(client, fake_github):
@@ -216,6 +248,25 @@ def test_verify_produces_declared_only_for_a_manifest_dependency_never_touched(c
     assert card["evidence_type"] == "declared_only"
     assert 0 < card["confidence_score"] < 0.3
     assert card["source_commits"] == []
+
+
+def test_search_dedupes_a_candidate_forked_across_taxonomy_versions(client, fake_github, monkeypatch):
+    """A candidate with cards for the same skill under two taxonomy_versions
+    (ticket 04's fork) must appear once in /search, at their latest version —
+    not once per stale + current card."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+    original_version = taxonomy.taxonomy_version()
+
+    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"], "searchable": True})
+
+    monkeypatch.setattr(taxonomy, "taxonomy_version", lambda: original_version + 1)
+    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"], "searchable": True})
+
+    results = client.get("/search?skill=FastAPI&min_score=0").json()["results"]
+    matches = [r for r in results if r["candidate_id"] == candidate_id]
+
+    assert len(matches) == 1
 
 
 def test_search_is_rate_limited_per_ip(client, fake_github):
