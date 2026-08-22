@@ -18,6 +18,12 @@ VOLUME_SATURATION_CONSTANT = 5  # volume = n_commits / (n_commits + this)
 SPAN_SATURATION_DAYS = 90  # span = span_days / (span_days + this)
 DEPTH_TOP_N = 3
 
+# A commit message is the Candidate's own free-form prose, easy to embellish on
+# a trivial change; a PR review comment is written/read by someone else and is
+# meaningfully harder to game. Discounting it keeps Depth from being inflatable
+# just by writing an elaborate commit message (hybrid-scoring ticket 03, ADR-0004).
+DEPTH_COMMIT_MESSAGE_DISCOUNT = 0.6
+
 
 @dataclass(frozen=True)
 class QualifyingEvidence:
@@ -62,11 +68,16 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
     else:
         evidence_type = "verified"
 
+    # Qualification (the 0.35 floor) always uses the raw similarity — an item
+    # either is or isn't real evidence, independent of how much it counts
+    # toward Depth's average. The discount only affects that second part.
     qualifying: list[tuple[EvidenceItem, float]] = []
     for item in matching_items:
-        similarity = embeddings.cosine_similarity(embeddings.embed(item.text), target_vector)
-        if similarity >= settings.evidence_qualifying_floor:
-            qualifying.append((item, similarity))
+        raw_similarity = embeddings.cosine_similarity(embeddings.embed(item.text), target_vector)
+        if raw_similarity < settings.evidence_qualifying_floor:
+            continue
+        depth_similarity = raw_similarity * DEPTH_COMMIT_MESSAGE_DISCOUNT if item.kind == "commit" else raw_similarity
+        qualifying.append((item, depth_similarity))
 
     depth = 0.0
     span = 0.0

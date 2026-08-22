@@ -80,6 +80,20 @@ def test_verify_scores_qualifying_evidence_and_excludes_low_signal(client, fake_
     assert rust_card["source_commits"] == []
 
 
+def test_verify_excludes_external_repo_commit_not_part_of_any_merged_pr(client, fake_github):
+    """The fixture's external repo has an author-matching commit
+    ('e2-not-in-any-merged-pr') that isn't part of the Candidate's merged PR
+    there — ticket 03's fork-and-fake defense must never let it count."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+
+    card = client.get(f"/evidence-card/{candidate_id}").json()["cards"][0]
+    refs = {r["ref"] for r in card["source_commits"]}
+    assert "e2-not-in-any-merged-pr" not in refs
+
+
 def test_evidence_card_reflects_processing_state_before_background_job_completes(
     client, fake_github, db_session_factory
 ):

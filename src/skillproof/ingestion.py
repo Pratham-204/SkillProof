@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
 from skillproof import heuristics, taxonomy
-from skillproof.github_client import GitHubClient
+from skillproof.github_client import CommitRecord, GitHubClient, PrCommentRecord, Repo
 
 
 @dataclass(frozen=True)
@@ -32,50 +33,87 @@ class EvidenceBundle:
 def ingest_evidence(client: GitHubClient, token: str, login: str) -> EvidenceBundle:
     """Pull commit diffs + PR review comments for a Candidate and drop low-signal items.
 
-    Covers both the Candidate's own public, non-fork repos and external repos
-    where they have at least one merged PR (issue 03). The docs/config-only
+    Owned, non-fork repos: Volume counts every commit the author-filtered fetch
+    returns, as in hybrid-scoring ticket 02. External (non-owned) repos: Volume
+    counts only commits belonging to a PR the Candidate actually opened and had
+    merged there (hybrid-scoring ticket 03) — fetched per merged PR, never via a
+    blanket author-filtered scan of the repo's full history, which a forked repo
+    would trivially satisfy with someone else's commits. The docs/config-only
     commit filter and short-PR-comment filter run here, before anything is
     embedded, so scoring never sees low-signal evidence. Manifest files are
-    fetched once per repo (issue 02), not once per claimed skill.
+    fetched once per repo (hybrid-scoring ticket 02), not once per claimed skill.
     """
-    repos = client.list_owned_public_repos(token, login) + client.list_external_repos_with_merged_prs(token, login)
+    owned_repos = client.list_owned_public_repos(token, login)
+    merged_prs = client.list_merged_prs(token, login)
+    external_repos = _dedupe_repos(pr.repo for pr in merged_prs)
+    all_repos = owned_repos + external_repos
     protected_filenames = taxonomy.all_detection_pattern_config_files()
 
+    manifests = {repo.full_name: client.get_manifest_files(token, repo) for repo in all_repos}
+
     items: list[EvidenceItem] = []
-    manifests: dict[str, dict[str, str]] = {}
-    for repo in repos:
-        manifests[repo.full_name] = client.get_manifest_files(token, repo)
+    seen_commit_keys: set[tuple[str, str]] = set()
 
+    for repo in owned_repos:
         for commit in client.list_commits(token, repo, login):
-            if heuristics.is_docs_or_config_only_commit(commit.files, protected_filenames):
-                continue
-            if not commit.message.strip() and not commit.diff_text.strip():
-                continue
-            items.append(
-                EvidenceItem(
-                    kind="commit",
-                    repo=repo.full_name,
-                    ref=commit.sha,
-                    url=commit.url,
-                    text=commit.message.strip(),
-                    date=commit.date,
-                    files=tuple(commit.files),
-                    diff_text=commit.diff_text,
-                )
-            )
+            _append_commit_evidence(items, seen_commit_keys, repo, commit, protected_filenames)
 
+    for pr in merged_prs:
+        for commit in client.list_pr_commits(token, pr.repo, pr.number):
+            _append_commit_evidence(items, seen_commit_keys, pr.repo, commit, protected_filenames)
+
+    for repo in all_repos:
         for comment in client.list_pr_review_comments(token, repo, login):
             if heuristics.is_low_effort_comment(comment.body):
                 continue
-            items.append(
-                EvidenceItem(
-                    kind="pr_comment",
-                    repo=repo.full_name,
-                    ref=str(comment.comment_id),
-                    url=comment.url,
-                    text=comment.body,
-                    date=comment.date,
-                )
-            )
+            items.append(_evidence_from_comment(repo, comment))
 
     return EvidenceBundle(items=items, manifests=manifests)
+
+
+def _dedupe_repos(repos: Iterable[Repo]) -> list[Repo]:
+    seen: dict[str, Repo] = {}
+    for repo in repos:
+        seen.setdefault(repo.full_name, repo)
+    return list(seen.values())
+
+
+def _append_commit_evidence(
+    items: list[EvidenceItem],
+    seen_commit_keys: set[tuple[str, str]],
+    repo: Repo,
+    commit: CommitRecord,
+    protected_filenames: frozenset[str],
+) -> None:
+    key = (repo.full_name, commit.sha)
+    if key in seen_commit_keys:
+        return  # the same commit can appear in more than one of a Candidate's merged PRs
+    seen_commit_keys.add(key)
+
+    if heuristics.is_docs_or_config_only_commit(commit.files, protected_filenames):
+        return
+    if not commit.message.strip() and not commit.diff_text.strip():
+        return
+    items.append(
+        EvidenceItem(
+            kind="commit",
+            repo=repo.full_name,
+            ref=commit.sha,
+            url=commit.url,
+            text=commit.message.strip(),
+            date=commit.date,
+            files=tuple(commit.files),
+            diff_text=commit.diff_text,
+        )
+    )
+
+
+def _evidence_from_comment(repo: Repo, comment: PrCommentRecord) -> EvidenceItem:
+    return EvidenceItem(
+        kind="pr_comment",
+        repo=repo.full_name,
+        ref=str(comment.comment_id),
+        url=comment.url,
+        text=comment.body,
+        date=comment.date,
+    )

@@ -17,11 +17,16 @@ _NOW = datetime.now(timezone.utc)
 UNRELATED_COMMIT_MESSAGE = "Bump internal counter, no behavior change."
 
 
+LOWER_SIMILARITY_COMMIT_MESSAGE = "Wrote a quick FastAPI helper for the health check route."
+
+
 def test_depth_uses_top_three_while_span_uses_the_full_qualifying_set():
     # Five higher-similarity commits (clustered within an 80-day span) plus one
-    # lower-similarity, later review comment that still clears the qualifying
-    # floor. All six count toward Span; only the three highest-similarity
-    # should end up in source_commits, since Depth is top_3 (not top_5).
+    # lower-similarity, later commit that still clears the qualifying floor.
+    # Same kind throughout so the Depth discount (ticket 03) scales both sides
+    # equally and doesn't interfere with this test's own concern: all six count
+    # toward Span; only the three highest-similarity end up in source_commits,
+    # since Depth is top_3 (not top_5).
     top_five_items = [
         EvidenceItem(
             kind="commit",
@@ -35,12 +40,13 @@ def test_depth_uses_top_three_while_span_uses_the_full_qualifying_set():
         for i in range(5)
     ]
     sixth_lower_similarity_item = EvidenceItem(
-        kind="pr_comment",
+        kind="commit",
         repo="octodev/skillproof-lib",
         ref="review-1",
         url="https://example.com/review-1",
-        text=QUALIFYING_REVIEW_COMMENT,
+        text=LOWER_SIMILARITY_COMMIT_MESSAGE,
         date=_NOW - timedelta(days=150),
+        diff_text=QUALIFYING_DIFF_TEXT,
     )
     bundle = EvidenceBundle(items=[*top_five_items, sixth_lower_similarity_item], manifests={})
 
@@ -51,6 +57,40 @@ def test_depth_uses_top_three_while_span_uses_the_full_qualifying_set():
     assert {ref.ref for ref in result.source_commits} == {"c0", "c1", "c2"}
     # The other three qualifying items are excluded from source_commits but still widen the span.
     assert result.temporal_span_days == 150
+
+
+def test_depth_discounts_commit_message_similarity_relative_to_pr_comment():
+    """Ticket 03: identical topical content, produced identical raw similarity —
+    the only difference is that one arrives as a commit message and the other
+    as a PR comment, so only the discount can explain their different Depth
+    contribution, with the commit message counting for less."""
+    identical_text = QUALIFYING_REVIEW_COMMENT
+    items = [
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref="c1",
+            url="https://example.com/c1",
+            text=identical_text,
+            date=_NOW,
+            diff_text=QUALIFYING_DIFF_TEXT,
+        ),
+        EvidenceItem(
+            kind="pr_comment",
+            repo="octodev/skillproof-lib",
+            ref="p1",
+            url="https://example.com/p1",
+            text=identical_text,
+            date=_NOW,
+        ),
+    ]
+    bundle = EvidenceBundle(items=items, manifests={})
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    by_kind = {ref.kind: ref.similarity for ref in result.source_commits}
+    assert by_kind["commit"] < by_kind["pr_comment"]
+    assert abs(by_kind["commit"] - round(by_kind["pr_comment"] * scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT, 4)) < 1e-4
 
 
 def test_volume_and_presence_from_matching_commits_with_no_depth_or_span_below_floor():

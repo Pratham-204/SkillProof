@@ -1,6 +1,13 @@
 from datetime import datetime, timedelta, timezone
 
-from skillproof.github_client import CommitRecord, FakeGitHubClient, GitHubUser, PrCommentRecord, Repo
+from skillproof.github_client import (
+    CommitRecord,
+    FakeGitHubClient,
+    GitHubUser,
+    MergedPullRequest,
+    PrCommentRecord,
+    Repo,
+)
 
 # Text calibrated against the real all-MiniLM-L6-v2 model (see implementation
 # notes): strongly similar to the "FastAPI" Skill Tag (>0.35), and essentially
@@ -31,6 +38,7 @@ DOCS_ONLY_COMMIT_MESSAGE = (
 
 OWNED_REPO = Repo(owner="octodev", name="skillproof-lib", fork=False)
 EXTERNAL_REPO = Repo(owner="someorg", name="cool-project", fork=False)
+EXTERNAL_REPO_MERGED_PR_NUMBER = 7
 
 _NOW = datetime.now(timezone.utc)
 
@@ -47,7 +55,7 @@ def wire_verified_candidate(fake_github: FakeGitHubClient, *, login: str, github
     fake_github.users_by_code[code] = GitHubUser(id=github_user_id, login=login)
 
     fake_github.owned_repos[login] = [OWNED_REPO]
-    fake_github.external_repos[login] = [EXTERNAL_REPO]
+    fake_github.merged_prs[login] = [MergedPullRequest(repo=EXTERNAL_REPO, number=EXTERNAL_REPO_MERGED_PR_NUMBER)]
 
     # Django is declared here but never touched by any commit below, proving
     # the declared_only path (issue 02) alongside FastAPI's fully-verified one.
@@ -73,7 +81,7 @@ def wire_verified_candidate(fake_github: FakeGitHubClient, *, login: str, github
             url=f"https://github.com/{OWNED_REPO.full_name}/commit/c2-docs-only",
         ),
     ]
-    fake_github.commits[EXTERNAL_REPO.full_name] = [
+    fake_github.pr_commits[(EXTERNAL_REPO.full_name, EXTERNAL_REPO_MERGED_PR_NUMBER)] = [
         CommitRecord(
             repo=EXTERNAL_REPO,
             sha="e1",
@@ -82,6 +90,22 @@ def wire_verified_candidate(fake_github: FakeGitHubClient, *, login: str, github
             files=["app/verify.py"],
             diff_text=QUALIFYING_DIFF_TEXT,
             url=f"https://github.com/{EXTERNAL_REPO.full_name}/commit/e1",
+        ),
+    ]
+    # Author-matching but NOT part of the merged PR above: proves the
+    # fork-and-fake defense (hybrid-scoring ticket 03) — a blanket author-filtered scan of
+    # cool-project's history would have picked this up, PR-scoping doesn't.
+    # `list_commits` is never called for external repos, so this is unreachable
+    # by the real ingestion path; it's here purely as a regression trap.
+    fake_github.commits[EXTERNAL_REPO.full_name] = [
+        CommitRecord(
+            repo=EXTERNAL_REPO,
+            sha="e2-not-in-any-merged-pr",
+            message=QUALIFYING_COMMIT_MESSAGE,
+            date=_NOW - timedelta(days=5),
+            files=["app/other.py"],
+            diff_text=QUALIFYING_DIFF_TEXT,
+            url=f"https://github.com/{EXTERNAL_REPO.full_name}/commit/e2-not-in-any-merged-pr",
         ),
     ]
 

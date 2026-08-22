@@ -78,6 +78,19 @@ class PrCommentRecord:
     url: str
 
 
+@dataclass(frozen=True)
+class MergedPullRequest:
+    """One PR the Candidate opened and had merged in an external (non-owned) repo.
+
+    Volume for external repos is scoped to exactly these PRs' own commits
+    (hybrid-scoring ticket 03) — never a blanket author-filtered scan of the
+    repo's full history, which a forked repo would trivially satisfy with someone else's work.
+    """
+
+    repo: Repo
+    number: int
+
+
 class GitHubClient(ABC):
     """Everything the app needs from GitHub, as one seam.
 
@@ -95,10 +108,17 @@ class GitHubClient(ABC):
     def list_owned_public_repos(self, token: str, login: str) -> list[Repo]: ...
 
     @abstractmethod
-    def list_external_repos_with_merged_prs(self, token: str, login: str) -> list[Repo]: ...
+    def list_merged_prs(self, token: str, login: str) -> list[MergedPullRequest]:
+        """Every PR the Candidate opened and had merged in a repo they don't own."""
+        ...
 
     @abstractmethod
     def list_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]: ...
+
+    @abstractmethod
+    def list_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
+        """Commits belonging to one specific (merged) PR, for external-repo Volume scoping (hybrid-scoring ticket 03)."""
+        ...
 
     @abstractmethod
     def list_pr_review_comments(self, token: str, repo: Repo, author_login: str) -> list[PrCommentRecord]: ...
@@ -147,19 +167,19 @@ class RealGitHubClient(GitHubClient):
         data = self._get_json(token, f"/users/{login}/repos", params={"type": "owner", "per_page": 100})
         return [Repo(owner=r["owner"]["login"], name=r["name"], fork=r["fork"]) for r in data if not r["fork"]]
 
-    def list_external_repos_with_merged_prs(self, token: str, login: str) -> list[Repo]:
+    def list_merged_prs(self, token: str, login: str) -> list[MergedPullRequest]:
         data = self._get_json(
             token,
             "/search/issues",
             params={"q": f"author:{login} type:pr is:merged", "per_page": 100},
         )
-        seen: dict[str, Repo] = {}
+        results = []
         for item in data.get("items", []):
             owner, name = _owner_and_name_from_repo_url(item["repository_url"])
             if owner.lower() == login.lower():
                 continue
-            seen[f"{owner}/{name}"] = Repo(owner=owner, name=name, fork=False)
-        return list(seen.values())
+            results.append(MergedPullRequest(repo=Repo(owner=owner, name=name, fork=False), number=item["number"]))
+        return results
 
     def list_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
         commits = self._get_json(
@@ -167,23 +187,25 @@ class RealGitHubClient(GitHubClient):
             f"/repos/{repo.full_name}/commits",
             params={"author": author_login, "per_page": 100},
         )
-        records = []
-        for c in commits:
-            detail = self._get_json(token, f"/repos/{repo.full_name}/commits/{c['sha']}")
-            files = [f["filename"] for f in detail.get("files", [])]
-            diff_text = "\n".join(f.get("patch", "") for f in detail.get("files", []) if f.get("patch"))
-            records.append(
-                CommitRecord(
-                    repo=repo,
-                    sha=c["sha"],
-                    message=detail["commit"]["message"],
-                    date=_parse_date(detail["commit"]["author"]["date"]),
-                    files=files,
-                    diff_text=diff_text,
-                    url=detail["html_url"],
-                )
-            )
-        return records
+        return [self._commit_record(token, repo, c["sha"]) for c in commits]
+
+    def list_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
+        commits = self._get_json(token, f"/repos/{repo.full_name}/pulls/{pr_number}/commits", params={"per_page": 100})
+        return [self._commit_record(token, repo, c["sha"]) for c in commits]
+
+    def _commit_record(self, token: str, repo: Repo, sha: str) -> CommitRecord:
+        detail = self._get_json(token, f"/repos/{repo.full_name}/commits/{sha}")
+        files = [f["filename"] for f in detail.get("files", [])]
+        diff_text = "\n".join(f.get("patch", "") for f in detail.get("files", []) if f.get("patch"))
+        return CommitRecord(
+            repo=repo,
+            sha=sha,
+            message=detail["commit"]["message"],
+            date=_parse_date(detail["commit"]["author"]["date"]),
+            files=files,
+            diff_text=diff_text,
+            url=detail["html_url"],
+        )
 
     def list_pr_review_comments(self, token: str, repo: Repo, author_login: str) -> list[PrCommentRecord]:
         data = self._get_json(token, f"/repos/{repo.full_name}/pulls/comments", params={"per_page": 100})
@@ -274,8 +296,9 @@ class FakeGitHubClient(GitHubClient):
     users_by_code: dict[str, GitHubUser] = field(default_factory=dict)
     tokens_by_code: dict[str, str] = field(default_factory=dict)
     owned_repos: dict[str, list[Repo]] = field(default_factory=dict)
-    external_repos: dict[str, list[Repo]] = field(default_factory=dict)
+    merged_prs: dict[str, list[MergedPullRequest]] = field(default_factory=dict)
     commits: dict[str, list[CommitRecord]] = field(default_factory=dict)
+    pr_commits: dict[tuple[str, int], list[CommitRecord]] = field(default_factory=dict)
     pr_comments: dict[str, list[PrCommentRecord]] = field(default_factory=dict)
     manifest_files: dict[str, dict[str, str]] = field(default_factory=dict)
     revoked_tokens: set[str] = field(default_factory=set)
@@ -294,13 +317,17 @@ class FakeGitHubClient(GitHubClient):
         self._check_token(token)
         return self.owned_repos.get(login, [])
 
-    def list_external_repos_with_merged_prs(self, token: str, login: str) -> list[Repo]:
+    def list_merged_prs(self, token: str, login: str) -> list[MergedPullRequest]:
         self._check_token(token)
-        return self.external_repos.get(login, [])
+        return self.merged_prs.get(login, [])
 
     def list_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
         self._check_token(token)
         return self.commits.get(repo.full_name, [])
+
+    def list_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
+        self._check_token(token)
+        return self.pr_commits.get((repo.full_name, pr_number), [])
 
     def list_pr_review_comments(self, token: str, repo: Repo, author_login: str) -> list[PrCommentRecord]:
         self._check_token(token)
