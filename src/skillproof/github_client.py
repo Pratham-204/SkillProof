@@ -157,15 +157,25 @@ class GitHubClient(ABC):
 class RealGitHubClient(GitHubClient):
     """Talks to api.github.com over HTTPS, read-only, public data only."""
 
-    def __init__(self, client_id: str | None = None, client_secret: str | None = None):
+    def __init__(
+        self,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        transport: httpx.BaseTransport | None = None,
+    ):
+        """`transport` is the test seam: pass `httpx.MockTransport(handler)` to drive
+        this client without a real network call. Left unset, httpx uses its normal
+        transport, so production behavior is unaffected.
+        """
         settings = get_settings()
         self._client_id = client_id or settings.github_client_id
         self._client_secret = client_secret or settings.github_client_secret
         self._etag_cache: dict[str, tuple[str, object]] = {}
+        self._client = httpx.Client(transport=transport, timeout=15)
 
     def exchange_code_for_token(self, code: str) -> str:
         settings = get_settings()
-        response = httpx.post(
+        response = self._client.post(
             "https://github.com/login/oauth/access_token",
             headers={"Accept": "application/json"},
             data={
@@ -188,17 +198,17 @@ class RealGitHubClient(GitHubClient):
         return GitHubUser(id=data["id"], login=data["login"])
 
     def list_owned_public_repos(self, token: str, login: str) -> list[Repo]:
-        data = self._get_json(token, f"/users/{login}/repos", params={"type": "owner", "per_page": 100})
+        data = self._get_all_pages(token, f"/users/{login}/repos", params={"type": "owner", "per_page": 100})
         return [Repo(owner=r["owner"]["login"], name=r["name"], fork=r["fork"]) for r in data if not r["fork"]]
 
     def list_merged_prs(self, token: str, login: str) -> list[MergedPullRequest]:
-        data = self._get_json(
+        data = self._get_all_pages(
             token,
             "/search/issues",
             params={"q": f"author:{login} type:pr is:merged", "per_page": 100},
         )
         results = []
-        for item in data.get("items", []):
+        for item in data:
             owner, name = _owner_and_name_from_repo_url(item["repository_url"])
             if owner.lower() == login.lower():
                 continue
@@ -206,7 +216,7 @@ class RealGitHubClient(GitHubClient):
         return results
 
     def _fetch_owned_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
-        commits = self._get_json(
+        commits = self._get_all_pages(
             token,
             f"/repos/{repo.full_name}/commits",
             params={"author": author_login, "per_page": 100},
@@ -214,7 +224,9 @@ class RealGitHubClient(GitHubClient):
         return [self._commit_record(token, repo, c["sha"]) for c in commits]
 
     def _fetch_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
-        commits = self._get_json(token, f"/repos/{repo.full_name}/pulls/{pr_number}/commits", params={"per_page": 100})
+        commits = self._get_all_pages(
+            token, f"/repos/{repo.full_name}/pulls/{pr_number}/commits", params={"per_page": 100}
+        )
         return [self._commit_record(token, repo, c["sha"]) for c in commits]
 
     def _commit_record(self, token: str, repo: Repo, sha: str) -> CommitRecord:
@@ -232,7 +244,7 @@ class RealGitHubClient(GitHubClient):
         )
 
     def list_pr_review_comments(self, token: str, repo: Repo, author_login: str) -> list[PrCommentRecord]:
-        data = self._get_json(token, f"/repos/{repo.full_name}/pulls/comments", params={"per_page": 100})
+        data = self._get_all_pages(token, f"/repos/{repo.full_name}/pulls/comments", params={"per_page": 100})
         return [
             PrCommentRecord(
                 repo=repo,
@@ -259,8 +271,35 @@ class RealGitHubClient(GitHubClient):
                 result[filename] = base64.b64decode(content).decode("utf-8", errors="replace")
         return result
 
-    def _get_json(self, token: str, path: str, params: dict | None = None, max_retries: int = 5):
-        url = f"https://api.github.com{path}"
+    def _get_json(self, token: str, path: str, params: dict | None = None):
+        """One single-object response — `/user`, a commit's detail, a manifest file.
+        Never paginated; see `_get_all_pages` for list-shaped endpoints."""
+        body, _ = self._fetch_page(token, f"https://api.github.com{path}", params)
+        return body
+
+    def _get_all_pages(self, token: str, path: str, params: dict | None = None, max_pages: int = 100) -> list:
+        """Follows the response's `Link: rel="next"` header until exhausted, so a
+        result set bigger than one `per_page=100` page is never silently truncated —
+        the bug this method replaces. Handles both a bare JSON array and the GitHub
+        search API's `{"items": [...]}` shape, flattening either into one list.
+        `max_pages` is a safety net against a malformed/cyclical Link header, the
+        same defensive bound `_fetch_page`'s own retry loop already applies.
+        """
+        url: str | None = f"https://api.github.com{path}"
+        results: list = []
+        for _ in range(max_pages):
+            if url is None:
+                break
+            body, response = self._fetch_page(token, url, params)
+            results.extend(body["items"] if isinstance(body, dict) else body)
+            url = response.links.get("next", {}).get("url")
+            params = None  # the next-page URL already carries the full query string
+        return results
+
+    def _fetch_page(self, token: str, url: str, params: dict | None, max_retries: int = 5):
+        """One page: handles auth errors, secondary-rate-limit backoff, and ETag
+        caching. Returns `(body, response)` — callers needing the next-page Link
+        header (`_get_all_pages`) read it off `response.links`."""
         cache_key = f"{url}?{params}"
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         cached_etag, cached_body = self._etag_cache.get(cache_key, (None, None))
@@ -269,9 +308,9 @@ class RealGitHubClient(GitHubClient):
 
         attempt = 0
         while True:
-            response = httpx.get(url, headers=headers, params=params, timeout=15)
+            response = self._client.get(url, headers=headers, params=params)
             if response.status_code == 304 and cached_body is not None:
-                return cached_body
+                return cached_body, response
             if response.status_code == 401:
                 raise GitHubAuthError("GitHub token is invalid or has been revoked")
             if response.status_code == 403 and _is_secondary_rate_limit(response) and attempt < max_retries:
@@ -283,7 +322,7 @@ class RealGitHubClient(GitHubClient):
             etag = response.headers.get("ETag")
             if etag:
                 self._etag_cache[cache_key] = (etag, body)
-            return body
+            return body, response
 
 
 def _append_unique(commits: list[CommitRecord], seen: set[tuple[str, str]], commit: CommitRecord) -> None:
