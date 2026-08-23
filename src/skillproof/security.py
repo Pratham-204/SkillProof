@@ -1,3 +1,5 @@
+import secrets
+
 from cryptography.fernet import Fernet, InvalidToken
 
 from skillproof.config import get_settings
@@ -5,6 +7,10 @@ from skillproof.config import get_settings
 
 class TokenDecryptionError(Exception):
     pass
+
+
+def generate_session_token() -> str:
+    return secrets.token_urlsafe(32)
 
 
 def _fernet() -> Fernet:

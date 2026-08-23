@@ -15,6 +15,7 @@ dependencies = [
     "sentence-transformers>=3.2",
     "numpy>=1.26",
     "python-multipart>=0.0.12",
+    "sse-starlette>=2.1",
 ]
 
 [project.optional-dependencies]

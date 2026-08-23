@@ -9,9 +9,15 @@ from tests.fixtures.github_fixtures import wire_verified_candidate
 
 
 def _connect(client, *, login="octodev", github_user_id=42, code="test-code") -> dict:
-    response = client.get(f"/auth/github/callback?code={code}")
-    assert response.status_code == 200
-    return response.json()
+    """Drives the OAuth callback (which now redirects and sets a session cookie,
+    ADR-0006) then reads the resulting identity back via /auth/github/me, so
+    callers get the same {candidate_id, github_login, ...} shape as before."""
+    response = client.get(f"/auth/github/callback?code={code}", follow_redirects=False)
+    assert response.status_code in (302, 307)
+
+    me = client.get("/auth/github/me")
+    assert me.status_code == 200
+    return me.json()
 
 
 def test_connect_creates_then_reuses_candidate_identity(client, fake_github):
@@ -26,11 +32,9 @@ def test_connect_creates_then_reuses_candidate_identity(client, fake_github):
 
 def test_verify_rejects_unknown_skill_tag(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
-    candidate = _connect(client)
+    _connect(client)
 
-    response = client.post(
-        "/verify", json={"candidate_id": candidate["candidate_id"], "skills": ["Not A Real Skill"]}
-    )
+    response = client.post("/verify", json={"skills": ["Not A Real Skill"]})
 
     assert response.status_code == 400
 
@@ -40,9 +44,9 @@ def test_verify_rejects_skill_removed_from_taxonomy(client, fake_github):
     removed from the taxonomy; it must be rejected the same way an unknown
     skill is, with no separate rejection path."""
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
-    candidate = _connect(client)
+    _connect(client)
 
-    response = client.post("/verify", json={"candidate_id": candidate["candidate_id"], "skills": ["System design"]})
+    response = client.post("/verify", json={"skills": ["System design"]})
 
     assert response.status_code == 400
 
@@ -54,7 +58,7 @@ def test_verify_scores_qualifying_evidence_and_excludes_low_signal(client, fake_
 
     verify_response = client.post(
         "/verify",
-        json={"candidate_id": candidate_id, "skills": ["FastAPI", "Rust"], "searchable": True},
+        json={"skills": ["FastAPI", "Rust"], "searchable": True},
     )
     assert verify_response.status_code == 202
 
@@ -87,7 +91,7 @@ def test_verify_excludes_external_repo_commit_not_part_of_any_merged_pr(client, 
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate_id = _connect(client)["candidate_id"]
 
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    client.post("/verify", json={"skills": ["FastAPI"]})
 
     card = client.get(f"/evidence-card/{candidate_id}").json()["cards"][0]
     refs = {r["ref"] for r in card["source_commits"]}
@@ -121,11 +125,11 @@ def test_reverify_overwrites_existing_card_in_place(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate_id = _connect(client)["candidate_id"]
 
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    client.post("/verify", json={"skills": ["FastAPI"]})
     first = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
     assert len(first) == 1
 
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    client.post("/verify", json={"skills": ["FastAPI"]})
     second = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
 
     assert len(second) == 1  # overwritten in place, not duplicated
@@ -141,14 +145,14 @@ def test_reverify_under_bumped_taxonomy_version_forks_a_new_card(client, fake_gi
     candidate_id = _connect(client)["candidate_id"]
     original_version = taxonomy.taxonomy_version()
 
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    client.post("/verify", json={"skills": ["FastAPI"]})
     first = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
     assert len(first) == 1
     assert first[0]["taxonomy_version"] == original_version
 
     monkeypatch.setattr(taxonomy, "taxonomy_version", lambda: original_version + 1)
 
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    client.post("/verify", json={"skills": ["FastAPI"]})
     second = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
 
     # GET returns only the latest taxonomy_version per skill by default.
@@ -169,7 +173,40 @@ def test_verify_with_revoked_token_prompts_reconnect(client, fake_github):
     candidate_id = _connect(client)["candidate_id"]
     fake_github.revoked_tokens.add("token-for-test-code")
 
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    client.post("/verify", json={"skills": ["FastAPI"]})
+
+    body = client.get(f"/evidence-card/{candidate_id}").json()
+    assert body["needs_reconnect"] is True
+    assert body["cards"][0]["status"] == "failed"
+    assert "reconnect" in body["cards"][0]["error"].lower()
+
+
+def test_verify_with_undecryptable_token_prompts_reconnect(client, fake_github, db_session_factory):
+    """Same remedy as a revoked token, but a different cause: the stored ciphertext
+    no longer decrypts under the current SKILLPROOF_TOKEN_ENCRYPTION_KEY — e.g. the
+    key changed since the token was stored, which the fresh-key-per-process default
+    makes trivial to hit in a real deploy (ticket 09) and which this session actually
+    hit live against a real GitHub account after restarting the backend process."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    # A validly-formatted Fernet token, just encrypted under a different key than
+    # the app's current one — exactly what a key rotation/regeneration produces,
+    # as opposed to a malformed string (which would raise a different, unwrapped
+    # exception from the base64 layer rather than cryptography's InvalidToken).
+    from cryptography.fernet import Fernet
+
+    bogus_token = Fernet(Fernet.generate_key()).encrypt(b"github-token").decode()
+
+    db = db_session_factory()
+    try:
+        candidate = db.get(Candidate, candidate_id)
+        candidate.github_token_encrypted = bogus_token
+        db.commit()
+    finally:
+        db.close()
+
+    client.post("/verify", json={"skills": ["FastAPI"]})
 
     body = client.get(f"/evidence-card/{candidate_id}").json()
     assert body["needs_reconnect"] is True
@@ -180,7 +217,7 @@ def test_verify_with_revoked_token_prompts_reconnect(client, fake_github):
 def test_explain_generates_then_caches(client, fake_github, fake_groq):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate_id = _connect(client)["candidate_id"]
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    client.post("/verify", json={"skills": ["FastAPI"]})
 
     first = client.post(f"/explain/{candidate_id}/FastAPI")
     assert first.status_code == 200
@@ -195,7 +232,7 @@ def test_explain_generates_then_caches(client, fake_github, fake_groq):
 def test_explain_falls_back_then_retries_transparently(client, fake_github, fake_groq):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate_id = _connect(client)["candidate_id"]
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"]})
+    client.post("/verify", json={"skills": ["FastAPI"]})
 
     fake_groq.should_fail = True
     fallback = client.post(f"/explain/{candidate_id}/FastAPI")
@@ -213,11 +250,13 @@ def test_search_returns_only_opted_in_candidates_sorted_by_score(client, fake_gi
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="code-a")
     wire_verified_candidate(fake_github, login="privatedev", github_user_id=99, code="code-b")
 
+    # Identity now comes from whichever session is currently active (ADR-0006),
+    # so each candidate must be the active session at the moment they /verify.
     opted_in = _connect(client, login="octodev", github_user_id=42, code="code-a")
-    opted_out = _connect(client, login="privatedev", github_user_id=99, code="code-b")
+    client.post("/verify", json={"skills": ["FastAPI"], "searchable": True})
 
-    client.post("/verify", json={"candidate_id": opted_in["candidate_id"], "skills": ["FastAPI"], "searchable": True})
-    client.post("/verify", json={"candidate_id": opted_out["candidate_id"], "skills": ["FastAPI"], "searchable": False})
+    opted_out = _connect(client, login="privatedev", github_user_id=99, code="code-b")
+    client.post("/verify", json={"skills": ["FastAPI"], "searchable": False})
 
     results = client.get("/search?skill=FastAPI&min_score=0.1").json()["results"]
 
@@ -242,7 +281,7 @@ def test_verify_produces_declared_only_for_a_manifest_dependency_never_touched(c
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate_id = _connect(client)["candidate_id"]
 
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["Django"]})
+    client.post("/verify", json={"skills": ["Django"]})
 
     card = client.get(f"/evidence-card/{candidate_id}").json()["cards"][0]
     assert card["evidence_type"] == "declared_only"
@@ -258,10 +297,10 @@ def test_search_dedupes_a_candidate_forked_across_taxonomy_versions(client, fake
     candidate_id = _connect(client)["candidate_id"]
     original_version = taxonomy.taxonomy_version()
 
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"], "searchable": True})
+    client.post("/verify", json={"skills": ["FastAPI"], "searchable": True})
 
     monkeypatch.setattr(taxonomy, "taxonomy_version", lambda: original_version + 1)
-    client.post("/verify", json={"candidate_id": candidate_id, "skills": ["FastAPI"], "searchable": True})
+    client.post("/verify", json={"skills": ["FastAPI"], "searchable": True})
 
     results = client.get("/search?skill=FastAPI&min_score=0").json()["results"]
     matches = [r for r in results if r["candidate_id"] == candidate_id]

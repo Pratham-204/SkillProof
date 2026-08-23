@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+@theme {
+  --font-wordmark: "Fraunces", ui-serif, Georgia, serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+}
+
+/* Every animated/counting number (score count-up, commit counts, day spans)
+   must use Tailwind's built-in `tabular-nums` utility — without it, digit
+   widths change as the value animates and the number visibly jitters left
+   and right instead of just counting up. */

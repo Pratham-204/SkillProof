@@ -9,6 +9,8 @@ from skillproof import scoring, security, taxonomy
 from skillproof.github_client import GitHubAuthError, GitHubClient
 from skillproof.ingestion import ingest_evidence
 from skillproof.models import Candidate, EvidenceCard
+from skillproof.progress_bus import ProgressEvent, progress_bus
+from skillproof.security import TokenDecryptionError
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,12 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
 
     Runs after the originating request has already returned 202, so it opens
     its own DB session rather than reusing a request-scoped one.
+
+    Publishes real, already-happened progress to `progress_bus` as it goes
+    (ticket 03): a "scan" event per repo as ingestion processes it, a "reveal"
+    event per skill as its card is individually committed (rather than batched
+    in one commit at the end, as before), and a terminal "done" event on every
+    exit path via `finally`. Publishing is a no-op if nothing is subscribed.
     """
     db = session_factory()
     try:
@@ -55,13 +63,28 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
         # taxonomy is bumped again while this job is still running.
         current_version = taxonomy.taxonomy_version()
 
+        def on_repo_scanned(repo_full_name: str) -> None:
+            progress_bus.publish(candidate_id, ProgressEvent(kind="scan", detail=repo_full_name))
+
         try:
             token = security.decrypt_token(candidate.github_token_encrypted)
-            evidence_bundle = ingest_evidence(github_client, token, candidate.github_login)
+            evidence_bundle = ingest_evidence(
+                github_client, token, candidate.github_login, on_repo_scanned=on_repo_scanned
+            )
         except GitHubAuthError:
             candidate.needs_reconnect = True
             for skill in skills:
                 _fail_card(db, candidate_id, skill, current_version, "GitHub token was revoked; reconnect required")
+            db.commit()
+            return
+        except TokenDecryptionError:
+            # Same remedy as a revoked token (reconnect re-issues and re-encrypts
+            # it) even though the cause is different — e.g. SKILLPROOF_TOKEN_ENCRYPTION_KEY
+            # changed since this token was stored (ticket 09's "must be a persisted key"
+            # requirement exists specifically to keep this from happening in production).
+            candidate.needs_reconnect = True
+            for skill in skills:
+                _fail_card(db, candidate_id, skill, current_version, "GitHub token could not be decrypted; reconnect required")
             db.commit()
             return
         except Exception as exc:  # pragma: no cover - defensive, unexpected ingestion failure
@@ -72,6 +95,7 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
             return
 
         candidate.needs_reconnect = False
+        db.commit()
 
         for skill in skills:
             result = scoring.score_skill(evidence_bundle, skill)
@@ -90,9 +114,13 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
             # from the prior run no longer matches the freshly scored evidence.
             card.explanation = None
             card.explanation_is_fallback = False
-
-        db.commit()
+            # Committed per skill (not batched after the loop) so the reveal
+            # event below reflects a card that's actually readable via GET
+            # /evidence-card the moment a client receives it.
+            db.commit()
+            progress_bus.publish(candidate_id, ProgressEvent(kind="reveal", detail=skill))
     finally:
+        progress_bus.publish(candidate_id, ProgressEvent(kind="done", detail=""))
         db.close()
 
 

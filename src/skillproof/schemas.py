@@ -17,7 +17,6 @@ class CandidateOut(BaseModel):
 
 
 class VerifyRequest(BaseModel):
-    candidate_id: str
     skills: list[str] = Field(min_length=1)
     searchable: bool | None = None
 

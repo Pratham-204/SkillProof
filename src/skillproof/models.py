@@ -31,6 +31,19 @@ class Candidate(Base):
     )
 
 
+class CandidateSession(Base):
+    """An opaque session id → candidate_id mapping, set as an HttpOnly cookie at
+    OAuth callback (ADR-0006). candidate_id is intentionally public (it's in
+    Evidence Card URLs), so it can't itself be trusted as an auth credential;
+    this is what /verify and the searchable toggle authenticate against instead."""
+
+    __tablename__ = "candidate_sessions"
+
+    session_id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.candidate_id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class EvidenceCard(Base):
     __tablename__ = "evidence_cards"
     __table_args__ = (

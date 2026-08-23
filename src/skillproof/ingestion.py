@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -63,7 +63,12 @@ class EvidenceBundle:
     manifests: dict[str, dict[str, str]]  # repo full_name -> {filename: content}
 
 
-def ingest_evidence(client: GitHubClient, token: str, login: str) -> EvidenceBundle:
+def ingest_evidence(
+    client: GitHubClient,
+    token: str,
+    login: str,
+    on_repo_scanned: Callable[[str], None] | None = None,
+) -> EvidenceBundle:
     """Pull commit diffs + PR review comments for a Candidate and drop low-signal items.
 
     Volume-qualifying commit scoping (owned-repo vs. external-repo, PR-membership —
@@ -71,6 +76,11 @@ def ingest_evidence(client: GitHubClient, token: str, login: str) -> EvidenceBun
     The docs/config-only commit filter and short-PR-comment filter run here, before
     anything is embedded, so scoring never sees low-signal evidence. Manifest files
     are fetched once per repo (hybrid-scoring ticket 02), not once per claimed skill.
+
+    `on_repo_scanned`, forwarded to `list_qualifying_commits`, reports real per-repo
+    progress during commit-fetching (the dominant cost here) for the verify SSE
+    stream (ticket 03) — it doesn't also cover the separate manifest/PR-comment
+    loops below.
     """
     owned_repos = client.list_owned_public_repos(token, login)
     merged_prs = client.list_merged_prs(token, login)
@@ -82,7 +92,7 @@ def ingest_evidence(client: GitHubClient, token: str, login: str) -> EvidenceBun
 
     items: list[EvidenceItem] = []
 
-    for commit in client.list_qualifying_commits(token, login):
+    for commit in client.list_qualifying_commits(token, login, on_repo_scanned=on_repo_scanned):
         _append_commit_evidence(items, commit, protected_filenames)
 
     for repo in all_repos:

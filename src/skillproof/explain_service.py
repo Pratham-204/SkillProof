@@ -22,7 +22,14 @@ def _pluralize(count: int, noun: str) -> str:
 def template_fallback(card: EvidenceCard) -> str:
     refs = card.source_commits or []
     if not refs:
-        return f"No qualifying GitHub evidence was found for {card.skill}, so the confidence score is 0."
+        # confidence_score isn't necessarily 0 here: a declared_only card (Presence
+        # only, never committed to) and a verified card where Volume/Presence/Span
+        # carried the score but no single commit or PR comment cleared the Depth
+        # qualifying floor both reach this branch with a nonzero score.
+        return (
+            f"No individual commit or PR comment qualified as evidence for {card.skill}, "
+            f"producing a confidence score of {card.confidence_score}."
+        )
 
     commit_count = sum(1 for r in refs if r["kind"] == "commit")
     review_count = sum(1 for r in refs if r["kind"] == "pr_comment")

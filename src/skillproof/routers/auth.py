@@ -5,9 +5,9 @@ from sqlalchemy.orm import Session
 from skillproof import security
 from skillproof.config import get_settings
 from skillproof.db import get_db
-from skillproof.deps import get_github_client
+from skillproof.deps import get_current_candidate, get_github_client
 from skillproof.github_client import GitHubClient
-from skillproof.models import Candidate
+from skillproof.models import Candidate, CandidateSession
 from skillproof.schemas import CandidateOut
 
 router = APIRouter(prefix="/auth/github", tags=["auth"])
@@ -25,14 +25,20 @@ def login() -> RedirectResponse:
     return RedirectResponse(url)
 
 
-@router.get("/callback", response_model=CandidateOut)
+@router.get("/callback")
 def callback(
     code: str,
     db: Session = Depends(get_db),
     github_client: GitHubClient = Depends(get_github_client),
-) -> CandidateOut:
+) -> RedirectResponse:
     """First login creates a Candidate keyed by GitHub user ID; a later login
     from the same account reuses the existing candidate_id (issue 01).
+
+    Issues an HttpOnly session cookie and redirects into the app, rather than
+    returning the Candidate as JSON (a browser mid-OAuth-redirect has nowhere
+    to receive that) or handing back candidate_id for the client to self-report
+    on future writes — the latter is exactly the trust ADR-0006 removes, since
+    candidate_id is intentionally public.
     """
     token = github_client.exchange_code_for_token(code)
     user = github_client.get_authenticated_user(token)
@@ -50,7 +56,25 @@ def callback(
         candidate.github_token_encrypted = security.encrypt_token(token)
         candidate.needs_reconnect = False
 
-    db.commit()
-    db.refresh(candidate)
+    db.flush()  # populates candidate.candidate_id for a brand-new Candidate before the session row references it
 
+    session = CandidateSession(session_id=security.generate_session_token(), candidate_id=candidate.candidate_id)
+    db.add(session)
+    db.commit()
+
+    settings = get_settings()
+    response = RedirectResponse(settings.github_oauth_success_redirect)
+    response.set_cookie(
+        key=settings.session_cookie_name,
+        value=session.session_id,
+        httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@router.get("/me", response_model=CandidateOut)
+def me(candidate: Candidate = Depends(get_current_candidate)) -> CandidateOut:
     return CandidateOut.model_validate(candidate)

@@ -53,13 +53,26 @@ def test_build_prompt_states_none_when_no_qualifying_evidence():
     assert "(none)" in build_prompt(card)
 
 
-def test_template_fallback_with_no_evidence():
-    card = _card(source_commits=[])
+def test_template_fallback_with_no_evidence_and_zero_score():
+    card = _card(source_commits=[], confidence_score=0.0)
 
     text = template_fallback(card)
 
-    assert "No qualifying GitHub evidence was found for FastAPI" in text
-    assert "0" in text
+    assert "FastAPI" in text
+    assert "0.0" in text
+
+
+def test_template_fallback_with_no_qualifying_items_reports_actual_nonzero_score():
+    """A verified card can reach zero qualifying (Depth-floor-clearing) items while
+    Presence/Volume/Span still produced a real nonzero score (round 6) — the fallback
+    text must report that actual score, not silently claim it's 0."""
+    card = _card(source_commits=[], confidence_score=0.27)
+
+    text = template_fallback(card)
+
+    assert "FastAPI" in text
+    assert "0.27" in text
+    assert "confidence score is 0" not in text
 
 
 def test_template_fallback_pluralizes_singular_commit_correctly():

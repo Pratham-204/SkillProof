@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from urllib.parse import urlparse
@@ -121,7 +122,9 @@ class GitHubClient(ABC):
         keyed by filename. Missing files are simply absent from the result, not an error."""
         ...
 
-    def list_qualifying_commits(self, token: str, login: str) -> list[CommitRecord]:
+    def list_qualifying_commits(
+        self, token: str, login: str, on_repo_scanned: Callable[[str], None] | None = None
+    ) -> list[CommitRecord]:
         """The Candidate's Volume-qualifying commits (ADR-0004): every author-matching
         commit in their owned, non-fork repos, plus — for repos they don't own — only
         commits that are part of a PR they actually opened and had merged there. This
@@ -129,18 +132,33 @@ class GitHubClient(ABC):
         applies to each) lives here, once, rather than in the caller or duplicated per
         adapter, so there's no method left to call that would let an external repo's
         unscoped commit history count. Adapters only implement the two fetch hooks below.
+
+        `on_repo_scanned`, if given, is called once per unique repo (owned or
+        external) right after that repo's commits have been gathered — real,
+        already-happened per-repo progress for the verify SSE stream (ticket 03),
+        not a fabricated signal. A repo with more than one merged PR is only
+        announced once, on first encounter.
         """
         owned_repos = self.list_owned_public_repos(token, login)
         merged_prs = self.list_merged_prs(token, login)
 
         commits: list[CommitRecord] = []
         seen: set[tuple[str, str]] = set()
+        announced: set[str] = set()
+
+        def _announce(repo: Repo) -> None:
+            if on_repo_scanned is not None and repo.full_name not in announced:
+                announced.add(repo.full_name)
+                on_repo_scanned(repo.full_name)
+
         for repo in owned_repos:
             for commit in self._fetch_owned_commits(token, repo, login):
                 _append_unique(commits, seen, commit)
+            _announce(repo)
         for pr in merged_prs:
             for commit in self._fetch_pr_commits(token, pr.repo, pr.number):
                 _append_unique(commits, seen, commit)
+            _announce(pr.repo)
         return commits
 
     @abstractmethod
