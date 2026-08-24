@@ -71,7 +71,10 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
         <ScoreCounter score={card.confidence_score} className={`text-lg ${isWeak ? 'opacity-60' : ''}`} />
       </button>
       <p className={`mt-1 text-xs ${isWeak ? 'text-neutral-500' : 'text-neutral-600 dark:text-neutral-400'}`}>
-        {card.evidence_type === 'verified' && `${card.source_commits.length} qualifying commits/comments`}
+        {card.evidence_type === 'verified' &&
+          (card.source_commits.length > 0
+            ? `${card.source_commits.length} evidence item${card.source_commits.length === 1 ? '' : 's'} matched closely enough for Depth`
+            : 'Real commits found, but none closely matched the skill description')}
         {card.evidence_type === 'declared_only' && 'Declared in a manifest — never touched in a commit'}
         {card.evidence_type === 'none' && 'No evidence found'}
       </p>
