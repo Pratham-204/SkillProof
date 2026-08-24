@@ -7,11 +7,22 @@ from skillproof.models import EvidenceCard
 def build_prompt(card: EvidenceCard) -> str:
     refs = card.source_commits or []
     evidence_lines = "\n".join(f"- ({ref['kind']}) {ref['repo']}: similarity {ref['similarity']}" for ref in refs)
+    instruction = "Write one sentence explaining why this candidate's evidence supports (or doesn't support) this score."
+    if not refs and card.evidence_type == "verified":
+        # Volume/Presence/Span can produce a real score from matching commits even when
+        # none cleared the Depth similarity floor — the LLM must not read the empty
+        # evidence list as "nothing was found" and contradict `verified` (see
+        # template_fallback's twin of this same case).
+        instruction += (
+            " Commits matching this skill's pattern were found, but none were similar enough to the "
+            "skill's description to count as strong evidence — say that, don't say no evidence was found."
+        )
     return (
         f"Skill: {card.skill}\n"
         f"Confidence score: {card.confidence_score}\n"
+        f"Evidence type: {card.evidence_type}\n"
         f"Qualifying evidence ({len(refs)} items):\n{evidence_lines or '(none)'}\n\n"
-        "Write one sentence explaining why this candidate's evidence supports (or doesn't support) this score."
+        f"{instruction}"
     )
 
 
@@ -25,7 +36,15 @@ def template_fallback(card: EvidenceCard) -> str:
         # confidence_score isn't necessarily 0 here: a declared_only card (Presence
         # only, never committed to) and a verified card where Volume/Presence/Span
         # carried the score but no single commit or PR comment cleared the Depth
-        # qualifying floor both reach this branch with a nonzero score.
+        # qualifying floor both reach this branch with a nonzero score. Only the
+        # first of those actually has zero matching commits, though — a verified
+        # card gets its own wording so it doesn't falsely claim no evidence exists.
+        if card.evidence_type == "verified":
+            return (
+                f"Commits matching {card.skill}'s pattern were found, but none were similar enough to "
+                f"{card.skill}'s description to count as Depth evidence, producing a confidence score "
+                f"of {card.confidence_score}."
+            )
         return (
             f"No individual commit or PR comment qualified as evidence for {card.skill}, "
             f"producing a confidence score of {card.confidence_score}."

@@ -12,7 +12,7 @@ _DOCS_OR_CONFIG_PATTERNS = (
     re.compile(r"^\.github/", re.IGNORECASE),
 )
 
-MIN_PR_COMMENT_WORDS = 10
+MIN_PR_COMMENT_WORDS = 5
 
 
 def is_file_docs_or_config(path: str) -> bool:

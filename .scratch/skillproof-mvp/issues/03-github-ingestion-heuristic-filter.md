@@ -12,3 +12,7 @@
 - [x] Commits that touch only docs/config files are dropped before scoring.
 - [x] PR comments under 10 words are dropped before scoring.
 - [x] Private repositories are never accessed.
+
+## Comments
+
+- Round 9 (CONTEXT.md): the low-effort PR-comment word floor was lowered from 10 to 5 words (`heuristics.MIN_PR_COMMENT_WORDS`) — the checklist item above reflects the original ticket, this repo's current behavior is 5.

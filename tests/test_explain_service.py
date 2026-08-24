@@ -53,6 +53,22 @@ def test_build_prompt_states_none_when_no_qualifying_evidence():
     assert "(none)" in build_prompt(card)
 
 
+def test_build_prompt_warns_against_no_evidence_claim_when_verified_with_no_qualifying_items():
+    card = _card(source_commits=[], evidence_type="verified")
+
+    prompt = build_prompt(card)
+
+    assert "don't say no evidence was found" in prompt
+
+
+def test_build_prompt_omits_no_evidence_warning_when_declared_only():
+    card = _card(source_commits=[], evidence_type="declared_only")
+
+    prompt = build_prompt(card)
+
+    assert "don't say no evidence was found" not in prompt
+
+
 def test_template_fallback_with_no_evidence_and_zero_score():
     card = _card(source_commits=[], confidence_score=0.0)
 
@@ -66,13 +82,36 @@ def test_template_fallback_with_no_qualifying_items_reports_actual_nonzero_score
     """A verified card can reach zero qualifying (Depth-floor-clearing) items while
     Presence/Volume/Span still produced a real nonzero score (round 6) — the fallback
     text must report that actual score, not silently claim it's 0."""
-    card = _card(source_commits=[], confidence_score=0.27)
+    card = _card(source_commits=[], confidence_score=0.27, evidence_type="verified")
 
     text = template_fallback(card)
 
     assert "FastAPI" in text
     assert "0.27" in text
     assert "confidence score is 0" not in text
+
+
+def test_template_fallback_with_no_qualifying_items_does_not_claim_no_evidence_when_verified():
+    """The `verified` + empty-source_commits case has real matching commits behind
+    it (Volume found them; Depth's floor just discarded all of them) — the fallback
+    must not say "no individual commit or PR comment qualified", which would
+    contradict evidence_type='verified' and imply nothing was ever found."""
+    card = _card(source_commits=[], confidence_score=0.27, evidence_type="verified")
+
+    text = template_fallback(card)
+
+    assert "No individual commit or PR comment qualified" not in text
+    assert "were found" in text
+
+
+def test_template_fallback_with_declared_only_still_reports_no_evidence():
+    """A declared_only card genuinely has zero matching commits — this is the one
+    case the original "no individual commit or PR comment" wording is accurate for."""
+    card = _card(source_commits=[], confidence_score=0.20, evidence_type="declared_only")
+
+    text = template_fallback(card)
+
+    assert "No individual commit or PR comment qualified" in text
 
 
 def test_template_fallback_pluralizes_singular_commit_correctly():

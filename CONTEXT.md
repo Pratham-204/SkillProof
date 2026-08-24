@@ -107,6 +107,11 @@ _Avoid_: Public/private (the card is always public; this flag only controls disc
 
 See ADR-0008.
 
+## Resolved (round 9)
+
+- PR review comments are deliberately never Depth evidence for `language`-category Skill Tags (Python, JavaScript, TypeScript, Go, Rust, …). A comment has no file path of its own, so it can only match a Detection Pattern via `content_markers`/`manifest_packages` — and every language entry's `content_markers` is intentionally left empty, since generic syntax fragments (e.g. `"def "`, `"self."`) would false-positive on almost any code-review comment quoting a snippet. This is a taxonomy-design choice, not a gap to fill: language Skill Tags accrue Volume/Depth from commits (matched via file extension) only; PR comments remain a source of evidence for Skill Tags with a distinctive, low-noise API surface (frameworks/tools/infra) instead.
+- The `verified`-with-zero-qualifying-items fallback explanation (see the Evidence Item term) previously used the same wording as `declared_only` — "no individual commit or PR comment qualified as evidence" — even though a `verified` card has real Volume-qualifying commits behind it; they just didn't clear Depth's 0.35 floor. The two states now get distinct wording so the explanation never contradicts `evidence_type`.
+
 ## Notes
 
 - Recruiter has exactly one capability (`/search`) and no account — see the Recruiter, Searchable, and Explanation terms above.
