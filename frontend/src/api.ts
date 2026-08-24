@@ -24,12 +24,18 @@ export interface EvidenceRef {
   similarity: number
 }
 
+// "verified" (real commits touched it), "declared_only" (manifest lists it,
+// never committed to), "none" (no evidence at all) — see CONTEXT.md's
+// Declared-Only term. A real union, not a bare string, so a typo'd literal
+// anywhere that branches on this is a compile error, not a silent no-match.
+export type EvidenceType = 'verified' | 'declared_only' | 'none'
+
 export interface EvidenceCard {
   skill: string
   status: string
   error: string | null
   confidence_score: number
-  evidence_type: string
+  evidence_type: EvidenceType
   source_commits: EvidenceRef[]
   temporal_span_days: number
   taxonomy_version: number
@@ -47,7 +53,7 @@ export interface SearchResult {
   github_profile_url: string
   evidence_card_url: string
   confidence_score: number
-  evidence_type: string
+  evidence_type: EvidenceType
 }
 
 /** Resolves the current session, or `null` if there isn't one (401) — never throws for that case. */

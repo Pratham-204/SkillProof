@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { RateLimitedError, listSkills, searchCandidates, type SearchResult, type SkillTag } from '../api'
 import ScoreCounter from '../components/ScoreCounter'
 import SkillPicker from '../components/SkillPicker'
-import { evidenceCardClassName } from '../lib/evidenceStyle'
+import { evidenceCardClassName, evidenceTypeSummary, isWeakEvidence } from '../lib/evidence'
 
 type Status = 'idle' | 'loading' | 'ready' | 'rate-limited' | 'error'
 
@@ -80,7 +80,7 @@ export default function RecruiterSearch() {
         <ul className="flex w-full flex-col gap-3">
           {results.length === 0 && <p className="text-center text-neutral-500">No matching candidates.</p>}
           {results.map((r) => {
-            const isWeak = r.evidence_type !== 'verified'
+            const isWeak = isWeakEvidence(r.evidence_type)
             return (
               <li key={r.candidate_id} className={evidenceCardClassName(isWeak)}>
                 <div className="flex items-center justify-between gap-3">
@@ -95,9 +95,7 @@ export default function RecruiterSearch() {
                   <ScoreCounter score={r.confidence_score} className={`text-lg ${isWeak ? 'opacity-60' : ''}`} />
                 </div>
                 <div className="mt-1 flex items-center justify-between text-xs text-neutral-500">
-                  <span>
-                    {r.evidence_type === 'declared_only' ? 'Declared only — never committed to' : r.evidence_type}
-                  </span>
+                  <span>{evidenceTypeSummary(r.evidence_type)}</span>
                   <Link to={`/c/${r.candidate_id}`} className="underline underline-offset-2">
                     View Evidence Card
                   </Link>

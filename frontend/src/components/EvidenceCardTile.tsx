@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion'
 import { useState } from 'react'
 import { explainSkill, type EvidenceCard } from '../api'
-import { evidenceCardClassName } from '../lib/evidenceStyle'
+import { evidenceCardClassName, evidenceTypeSummary, isWeakEvidence } from '../lib/evidence'
 import ScoreCounter from './ScoreCounter'
 
 const cardVariants = {
@@ -37,7 +37,7 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
     )
   }
 
-  const isWeak = card.evidence_type !== 'verified'
+  const isWeak = isWeakEvidence(card.evidence_type)
 
   // Fetched once per mount, then held in this tile's own state — re-expanding
   // the same (still-mounted) card never re-fetches on top of the backend's
@@ -65,12 +65,7 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
         <ScoreCounter score={card.confidence_score} className={`text-lg ${isWeak ? 'opacity-60' : ''}`} />
       </button>
       <p className={`mt-1 text-xs ${isWeak ? 'text-neutral-500' : 'text-neutral-600 dark:text-neutral-400'}`}>
-        {card.evidence_type === 'verified' &&
-          (card.source_commits.length > 0
-            ? `${card.source_commits.length} evidence item${card.source_commits.length === 1 ? '' : 's'} matched closely enough for Depth`
-            : 'Real commits found, but none closely matched the skill description')}
-        {card.evidence_type === 'declared_only' && 'Declared in a manifest — never touched in a commit'}
-        {card.evidence_type === 'none' && 'No evidence found'}
+        {evidenceTypeSummary(card.evidence_type, card.source_commits.length)}
       </p>
 
       {expanded && (
