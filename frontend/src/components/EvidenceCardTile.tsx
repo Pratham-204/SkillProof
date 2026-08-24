@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion'
 import { useState } from 'react'
 import { explainSkill, type EvidenceCard } from '../api'
+import { evidenceCardClassName } from '../lib/evidenceStyle'
 import ScoreCounter from './ScoreCounter'
 
 const cardVariants = {
@@ -58,14 +59,7 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
   }
 
   return (
-    <motion.li
-      variants={cardVariants}
-      className={`rounded-xl border p-4 text-left ${
-        isWeak
-          ? 'border-dashed border-neutral-300 bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900/40'
-          : 'border-neutral-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900'
-      }`}
-    >
+    <motion.li variants={cardVariants} className={evidenceCardClassName(isWeak)}>
       <button type="button" onClick={handleToggle} className="flex w-full items-start justify-between gap-3 text-left">
         <p className="font-medium">{card.skill}</p>
         <ScoreCounter score={card.confidence_score} className={`text-lg ${isWeak ? 'opacity-60' : ''}`} />

@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { RateLimitedError, listSkills, searchCandidates, type SearchResult, type SkillTag } from '../api'
+import ScoreCounter from '../components/ScoreCounter'
 import SkillPicker from '../components/SkillPicker'
+import { evidenceCardClassName } from '../lib/evidenceStyle'
 
 type Status = 'idle' | 'loading' | 'ready' | 'rate-limited' | 'error'
 
@@ -80,14 +82,7 @@ export default function RecruiterSearch() {
           {results.map((r) => {
             const isWeak = r.evidence_type !== 'verified'
             return (
-              <li
-                key={r.candidate_id}
-                className={`rounded-xl border p-4 text-left ${
-                  isWeak
-                    ? 'border-dashed border-neutral-300 bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900/40'
-                    : 'border-neutral-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900'
-                }`}
-              >
+              <li key={r.candidate_id} className={evidenceCardClassName(isWeak)}>
                 <div className="flex items-center justify-between gap-3">
                   <a
                     href={r.github_profile_url}
@@ -97,10 +92,7 @@ export default function RecruiterSearch() {
                   >
                     {r.github_login}
                   </a>
-                  <span className={`font-mono text-lg tabular-nums ${isWeak ? 'opacity-60' : ''}`}>
-                    {Math.round(r.confidence_score * 100)}
-                    <span className="text-[0.6em] opacity-60">%</span>
-                  </span>
+                  <ScoreCounter score={r.confidence_score} className={`text-lg ${isWeak ? 'opacity-60' : ''}`} />
                 </div>
                 <div className="mt-1 flex items-center justify-between text-xs text-neutral-500">
                   <span>
