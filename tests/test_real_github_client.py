@@ -136,6 +136,27 @@ def test_repeated_call_reuses_cached_body_on_304():
     assert second.id == 1  # served from the ETag cache, not a fresh id=2 fetch
 
 
+def test_list_qualifying_commits_treats_409_empty_repo_as_zero_commits():
+    """GitHub returns 409 Conflict from an owned repo's /commits endpoint when
+    the repo has no commits yet (empty, no default branch) — that must be
+    treated as zero commits for that repo, not abort the whole scan."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/octodev/repos":
+            return httpx.Response(200, json=[{"owner": {"login": "octodev"}, "name": "empty-repo", "fork": False}])
+        if request.url.path == "/search/issues":
+            return httpx.Response(200, json={"items": []})
+        if request.url.path == "/repos/octodev/empty-repo/commits":
+            return httpx.Response(409, json={"message": "Git Repository is empty."})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = _client(handler)
+
+    commits = client.list_qualifying_commits("token", "octodev")
+
+    assert commits == []
+
+
 def test_get_manifest_files_retries_on_secondary_rate_limit_then_succeeds(monkeypatch):
     monkeypatch.setattr(github_client.time, "sleep", lambda seconds: None)
     attempts = {"requirements.txt": 0}

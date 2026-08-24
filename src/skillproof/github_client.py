@@ -234,11 +234,18 @@ class RealGitHubClient(GitHubClient):
         return results
 
     def _fetch_owned_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
-        commits = self._get_all_pages(
-            token,
-            f"/repos/{repo.full_name}/commits",
-            params={"author": author_login, "per_page": 100},
-        )
+        try:
+            commits = self._get_all_pages(
+                token,
+                f"/repos/{repo.full_name}/commits",
+                params={"author": author_login, "per_page": 100},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                # GitHub returns 409 Conflict from this endpoint for a repo with no
+                # commits yet (empty repo, no default branch) — zero commits, not an error.
+                return []
+            raise
         return [self._commit_record(token, repo, c["sha"]) for c in commits]
 
     def _fetch_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
