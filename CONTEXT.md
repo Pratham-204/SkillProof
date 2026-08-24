@@ -45,7 +45,7 @@ A one-sentence, LLM-generated justification for a Skill Tag's Confidence Score, 
 _Avoid_: Justification, summary
 
 **Recruiter**:
-An unauthenticated visitor who queries `/search` by Skill Tag and minimum Confidence Score to find ranked Candidates. Not a modeled account — no login, no saved state, no messaging. Distinct from a Candidate.
+An unauthenticated visitor who queries `/search` by one or more Skill Tags (AND semantics — a result must match every selected Skill Tag) to find ranked Candidates. Not a modeled account — no login, no saved state, no messaging. Distinct from a Candidate.
 _Avoid_: User (when a more specific term is meant)
 
 **Searchable**:
@@ -97,5 +97,6 @@ _Avoid_: Public/private (the card is always public; this flag only controls disc
 
 - Recruiter has exactly one capability (`/search`) and no account — see the Recruiter, Searchable, and Explanation terms above.
 - `/search` takes a hard result cap (e.g. `limit=50`), not full pagination — an implementation default, not a design branch.
+- `/search` caps a query at 8 Skill Tags (rejected with 400 if exceeded), mirroring `/verify`'s existing 8-skill cap. Results are ranked by the average Confidence Score across only the queried skills; see ADR-0007 for the AND semantics and per-skill result breakdown.
 - Explicitly out of scope: recruiter accounts/auth, saved searches, candidate messaging, applicant tracking, resume upload/hosting — Evidence Cards replace resumes, so serving resumes would undercut the product's premise.
 - Two follow-on features were scoped out of this pass, deferred to their own future specs: a **self-extending taxonomy** (parsing unknown manifest packages, proposing new Skill Tags via an LLM, human-approved before entering the scored path) and a **Depth Interview** (an unscored, LLM-conducted conversational artifact for skills with no code footprint — code-anchored, probing a specific commit, or experience-anchored, probing a Candidate's self-described private/internship work). Neither changes the current model; both get their own grilling session before further design. Multi-platform evidence sourcing (LeetCode, HackerRank, etc.) is a further-out idea, not yet scoped at all.

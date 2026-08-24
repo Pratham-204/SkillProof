@@ -62,16 +62,21 @@ class ExplainOut(BaseModel):
     explanation_is_fallback: bool
 
 
+class SearchMatchOut(BaseModel):
+    skill: str
+    confidence_score: float
+    evidence_type: str
+
+
 class SearchResultOut(BaseModel):
     candidate_id: str
     github_login: str
     github_profile_url: str
     evidence_card_url: str
-    confidence_score: float
-    evidence_type: str
+    average_score: float
+    matches: list[SearchMatchOut]
 
 
 class SearchResponse(BaseModel):
-    skill: str
-    min_score: float
+    skills: list[str]
     results: list[SearchResultOut]

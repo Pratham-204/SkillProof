@@ -1,27 +1,25 @@
-from fastapi import APIRouter, Depends, Request
-from sqlalchemy import desc, func
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from skillproof.config import get_settings
 from skillproof.db import get_db
 from skillproof.limiter import limiter
 from skillproof.models import Candidate, EvidenceCard
-from skillproof.schemas import SearchResponse, SearchResultOut
+from skillproof.schemas import SearchMatchOut, SearchResponse, SearchResultOut
 
 router = APIRouter(tags=["search"])
 
+MAX_SEARCH_SKILLS = 8
 
-@router.get("/search", response_model=SearchResponse)
-@limiter.limit(get_settings().search_rate_limit)
-def search(request: Request, skill: str, min_score: float = 0.0, db: Session = Depends(get_db)) -> SearchResponse:
-    """Unauthenticated, stateless, opt-in-only (issue 06). Rate limiting is
-    enforced by the SlowAPI middleware wired in main.py.
+
+def _qualifying_cards_for_skill(db: Session, skill: str) -> dict[str, EvidenceCard]:
+    """Searchable, complete Evidence Cards for one skill, keyed by candidate_id.
+
+    A candidate can have more than one card for this skill across
+    taxonomy_versions (ADR-0005/ticket 04); without this dedup, a re-verify
+    under a bumped taxonomy_version would surface the same candidate twice.
     """
-    settings = get_settings()
-
-    # A candidate can have more than one card for this skill across taxonomy_versions
-    # (ADR-0005/ticket 04); without this, a re-verify under a bumped taxonomy_version
-    # would surface the same candidate twice here under two different scores.
     latest_per_candidate = (
         db.query(EvidenceCard.candidate_id, func.max(EvidenceCard.taxonomy_version).label("taxonomy_version"))
         .filter(EvidenceCard.skill == skill)
@@ -30,8 +28,8 @@ def search(request: Request, skill: str, min_score: float = 0.0, db: Session = D
     )
 
     rows = (
-        db.query(Candidate, EvidenceCard)
-        .join(EvidenceCard, EvidenceCard.candidate_id == Candidate.candidate_id)
+        db.query(EvidenceCard)
+        .join(Candidate, EvidenceCard.candidate_id == Candidate.candidate_id)
         .join(
             latest_per_candidate,
             (EvidenceCard.candidate_id == latest_per_candidate.c.candidate_id)
@@ -41,23 +39,56 @@ def search(request: Request, skill: str, min_score: float = 0.0, db: Session = D
             Candidate.searchable.is_(True),
             EvidenceCard.skill == skill,
             EvidenceCard.status == "complete",
-            EvidenceCard.confidence_score >= min_score,
         )
-        .order_by(desc(EvidenceCard.confidence_score))
-        .limit(settings.search_result_limit)
         .all()
     )
+    return {card.candidate_id: card for card in rows}
 
-    results = [
-        SearchResultOut(
-            candidate_id=candidate.candidate_id,
-            github_login=candidate.github_login,
-            github_profile_url=f"https://github.com/{candidate.github_login}",
-            evidence_card_url=f"{str(request.base_url).rstrip('/')}/evidence-card/{candidate.candidate_id}",
-            confidence_score=card.confidence_score,
-            evidence_type=card.evidence_type,
+
+@router.get("/search", response_model=SearchResponse)
+@limiter.limit(get_settings().search_rate_limit)
+def search(request: Request, skill: list[str] = Query(...), db: Session = Depends(get_db)) -> SearchResponse:
+    """Unauthenticated, stateless, opt-in-only (issue 06). Rate limiting is
+    enforced by the SlowAPI middleware wired in main.py.
+
+    Multiple `skill` values are matched with AND semantics (ADR-0007): a
+    candidate appears only if they have a qualifying card for every selected
+    skill. `declared_only` still counts as qualifying. Results are ranked by
+    the average Confidence Score across exactly the selected skills.
+    """
+    settings = get_settings()
+
+    skills = list(dict.fromkeys(skill))  # dedupe, preserve query order
+    if len(skills) > MAX_SEARCH_SKILLS:
+        raise HTTPException(status_code=400, detail=f"At most {MAX_SEARCH_SKILLS} skills per search")
+
+    per_skill = {s: _qualifying_cards_for_skill(db, s) for s in skills}
+    candidate_ids = set.intersection(*(set(cards) for cards in per_skill.values()))
+
+    candidates = {
+        c.candidate_id: c for c in db.query(Candidate).filter(Candidate.candidate_id.in_(candidate_ids))
+    }
+
+    results = []
+    for candidate_id in candidate_ids:
+        candidate = candidates[candidate_id]
+        matches = []
+        for s in skills:
+            card = per_skill[s][candidate_id]
+            matches.append(SearchMatchOut(skill=s, confidence_score=card.confidence_score, evidence_type=card.evidence_type))
+        average_score = sum(m.confidence_score for m in matches) / len(matches)
+        results.append(
+            SearchResultOut(
+                candidate_id=candidate.candidate_id,
+                github_login=candidate.github_login,
+                github_profile_url=f"https://github.com/{candidate.github_login}",
+                evidence_card_url=f"{str(request.base_url).rstrip('/')}/evidence-card/{candidate.candidate_id}",
+                average_score=average_score,
+                matches=matches,
+            )
         )
-        for candidate, card in rows
-    ]
 
-    return SearchResponse(skill=skill, min_score=min_score, results=results)
+    results.sort(key=lambda r: r.average_score, reverse=True)
+    results = results[: settings.search_result_limit]
+
+    return SearchResponse(skills=skills, results=results)

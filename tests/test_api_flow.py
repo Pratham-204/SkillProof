@@ -3,6 +3,8 @@ spec's testing decisions: one seam at the FastAPI boundary, GitHub and Groq
 faked with fixture/canned data, embeddings and scoring run for real.
 """
 
+import pytest
+
 from skillproof import taxonomy, verify_service
 from skillproof.models import Candidate, EvidenceCard
 from tests.fixtures.github_fixtures import wire_verified_candidate
@@ -258,21 +260,92 @@ def test_search_returns_only_opted_in_candidates_sorted_by_score(client, fake_gi
     opted_out = _connect(client, login="privatedev", github_user_id=99, code="code-b")
     client.post("/verify", json={"skills": ["FastAPI"], "searchable": False})
 
-    results = client.get("/search?skill=FastAPI&min_score=0.1").json()["results"]
+    results = client.get("/search?skill=FastAPI").json()["results"]
 
     result_ids = [r["candidate_id"] for r in results]
     assert opted_in["candidate_id"] in result_ids
     assert opted_out["candidate_id"] not in result_ids
-    assert all(r["evidence_type"] for r in results)
+    assert all(r["matches"] for r in results)
 
     top_result = next(r for r in results if r["candidate_id"] == opted_in["candidate_id"])
     assert top_result["github_profile_url"] == "https://github.com/octodev"
     assert top_result["evidence_card_url"].startswith("http")
     assert top_result["evidence_card_url"].endswith(f"/evidence-card/{opted_in['candidate_id']}")
+    assert top_result["matches"] == [
+        {"skill": "FastAPI", "confidence_score": top_result["average_score"], "evidence_type": "verified"}
+    ]
 
     # Opting out of search never breaks the direct Evidence Card link.
     direct = client.get(f"/evidence-card/{opted_out['candidate_id']}")
     assert direct.status_code == 200
+
+
+def test_search_and_semantics_requires_every_selected_skill(client, fake_github):
+    """AND semantics (ADR-0007): a candidate must have a qualifying card for
+    every selected skill to appear. Django is manifest-declared but never
+    touched in the fixture, proving declared_only still counts as a match."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="code-a")
+    wire_verified_candidate(fake_github, login="onlyfastapi", github_user_id=43, code="code-b")
+
+    full_stack = _connect(client, login="octodev", github_user_id=42, code="code-a")
+    client.post("/verify", json={"skills": ["FastAPI", "Django"], "searchable": True})
+
+    partial = _connect(client, login="onlyfastapi", github_user_id=43, code="code-b")
+    client.post("/verify", json={"skills": ["FastAPI"], "searchable": True})
+
+    results = client.get("/search?skill=FastAPI&skill=Django").json()["results"]
+    result_ids = [r["candidate_id"] for r in results]
+
+    assert full_stack["candidate_id"] in result_ids
+    assert partial["candidate_id"] not in result_ids
+
+    match = next(r for r in results if r["candidate_id"] == full_stack["candidate_id"])
+    matches_by_skill = {m["skill"]: m for m in match["matches"]}
+    assert matches_by_skill["FastAPI"]["evidence_type"] == "verified"
+    assert matches_by_skill["Django"]["evidence_type"] == "declared_only"
+    assert 0 < matches_by_skill["Django"]["confidence_score"] < matches_by_skill["FastAPI"]["confidence_score"]
+
+
+def test_search_average_score_only_covers_selected_skills(client, fake_github):
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="code-a")
+    _connect(client, login="octodev", github_user_id=42, code="code-a")
+    client.post("/verify", json={"skills": ["FastAPI", "Django"], "searchable": True})
+
+    fastapi_only = client.get("/search?skill=FastAPI").json()["results"][0]
+    combined = client.get("/search?skill=FastAPI&skill=Django").json()["results"][0]
+
+    fastapi_score = next(m["confidence_score"] for m in combined["matches"] if m["skill"] == "FastAPI")
+    django_score = next(m["confidence_score"] for m in combined["matches"] if m["skill"] == "Django")
+
+    # A single-skill query's average must equal that skill's own score, even
+    # though the candidate has a second claimed skill — proves the average
+    # never folds in a skill outside the query.
+    assert fastapi_only["average_score"] == fastapi_score
+    assert combined["average_score"] == pytest.approx((fastapi_score + django_score) / 2)
+
+
+def test_search_rejects_more_than_eight_skills(client, fake_github):
+    too_many = "&".join(f"skill=Skill{i}" for i in range(9))
+    response = client.get(f"/search?{too_many}")
+    assert response.status_code == 400
+
+    exactly_eight = "&".join(f"skill=Skill{i}" for i in range(8))
+    response = client.get(f"/search?{exactly_eight}")
+    assert response.status_code == 200
+
+
+def test_search_deduplicates_a_repeated_skill_value(client, fake_github):
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="code-a")
+    _connect(client, login="octodev", github_user_id=42, code="code-a")
+    client.post("/verify", json={"skills": ["FastAPI"], "searchable": True})
+
+    body = client.get("/search?skill=FastAPI&skill=FastAPI").json()
+    assert body["skills"] == ["FastAPI"]
+
+    result = body["results"][0]
+    assert result["matches"] == [
+        {"skill": "FastAPI", "confidence_score": result["average_score"], "evidence_type": "verified"}
+    ]
 
 
 def test_verify_produces_declared_only_for_a_manifest_dependency_never_touched(client, fake_github):
@@ -290,19 +363,21 @@ def test_verify_produces_declared_only_for_a_manifest_dependency_never_touched(c
 
 
 def test_search_dedupes_a_candidate_forked_across_taxonomy_versions(client, fake_github, monkeypatch):
-    """A candidate with cards for the same skill under two taxonomy_versions
+    """A candidate with cards for the same skills under two taxonomy_versions
     (ticket 04's fork) must appear once in /search, at their latest version —
-    not once per stale + current card."""
+    not once per stale + current card. Exercised with a 2-skill AND query so
+    the per-skill dedup must hold independently for each skill being
+    intersected, not just in the single-skill case."""
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate_id = _connect(client)["candidate_id"]
     original_version = taxonomy.taxonomy_version()
 
-    client.post("/verify", json={"skills": ["FastAPI"], "searchable": True})
+    client.post("/verify", json={"skills": ["FastAPI", "Django"], "searchable": True})
 
     monkeypatch.setattr(taxonomy, "taxonomy_version", lambda: original_version + 1)
-    client.post("/verify", json={"skills": ["FastAPI"], "searchable": True})
+    client.post("/verify", json={"skills": ["FastAPI", "Django"], "searchable": True})
 
-    results = client.get("/search?skill=FastAPI&min_score=0").json()["results"]
+    results = client.get("/search?skill=FastAPI&skill=Django").json()["results"]
     matches = [r for r in results if r["candidate_id"] == candidate_id]
 
     assert len(matches) == 1
@@ -310,8 +385,8 @@ def test_search_dedupes_a_candidate_forked_across_taxonomy_versions(client, fake
 
 def test_search_is_rate_limited_per_ip(client, fake_github):
     for _ in range(60):
-        response = client.get("/search?skill=FastAPI&min_score=0")
+        response = client.get("/search?skill=FastAPI")
         assert response.status_code == 200
 
-    throttled = client.get("/search?skill=FastAPI&min_score=0")
+    throttled = client.get("/search?skill=FastAPI")
     assert throttled.status_code == 429

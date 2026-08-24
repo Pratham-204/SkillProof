@@ -47,13 +47,19 @@ export interface CandidateEvidence extends Candidate {
   cards: EvidenceCard[]
 }
 
+export interface SearchMatch {
+  skill: string
+  confidence_score: number
+  evidence_type: EvidenceType
+}
+
 export interface SearchResult {
   candidate_id: string
   github_login: string
   github_profile_url: string
   evidence_card_url: string
-  confidence_score: number
-  evidence_type: EvidenceType
+  average_score: number
+  matches: SearchMatch[]
 }
 
 /** Resolves the current session, or `null` if there isn't one (401) — never throws for that case. */
@@ -101,8 +107,9 @@ export async function explainSkill(
   return response.json()
 }
 
-export async function searchCandidates(skill: string, minScore: number): Promise<SearchResult[]> {
-  const params = new URLSearchParams({ skill, min_score: String(minScore) })
+export async function searchCandidates(skills: string[]): Promise<SearchResult[]> {
+  const params = new URLSearchParams()
+  skills.forEach((skill) => params.append('skill', skill))
   const response = await fetch(`/search?${params}`, { credentials: 'same-origin' })
   if (response.status === 429) throw new RateLimitedError()
   if (!response.ok) throw new Error(`GET /search failed: ${response.status}`)
