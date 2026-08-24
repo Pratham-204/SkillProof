@@ -42,6 +42,16 @@ npm run dev     # Vite dev server on :5173 with HMR; proxies /auth, /verify, /ev
 npm run build    # writes frontend/dist/, which FastAPI then serves for every non-API route.
 ```
 
+## Taxonomy growth
+
+The Skill Tag taxonomy self-extends (round 8 of `CONTEXT.md`, `docs/adr/0008-self-extending-taxonomy-skips-human-review.md`): `/verify` records a Sighting for any manifest-declared package matching no existing Skill Tag, and a separate batch job turns Sightings that clear a registry-existence check, a dedup check, and an LLM draft-or-abstain step into new, immediately claimable Skill Tags — no human approval step. Run it on a schedule (e.g. nightly cron) outside the app process:
+
+```
+.venv/Scripts/python -m skillproof.taxonomy_growth_cli
+```
+
+A running `uvicorn` process needs restarting to see any newly published Skill Tags — `skills.json` is read once and cached in-process, same as any other taxonomy edit.
+
 ## Deployment checklist (ticket 09)
 
 Before running this behind a real domain, outside local dev:

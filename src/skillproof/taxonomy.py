@@ -11,6 +11,10 @@ DATA_DIR = Path(__file__).parent / "data"
 SKILLS_PATH = DATA_DIR / "skills.json"
 EMBEDDINGS_CACHE_PATH = DATA_DIR / "skills_embeddings.npz"
 
+# The taxonomy's fixed category set. The self-extending taxonomy's LLM draft step is
+# constrained to these — it cannot mint a new category (round 8, ADR-0008).
+CATEGORIES = frozenset({"language", "framework", "infra", "datastore", "tool"})
+
 
 @dataclass(frozen=True)
 class ManifestPackage:
@@ -96,6 +100,61 @@ def all_detection_pattern_config_files() -> frozenset[str]:
     extension would otherwise read as pure config noise.
     """
     return frozenset(cf for skill in _raw_skills() for cf in skill.detection_pattern.config_files)
+
+
+@lru_cache
+def known_manifest_package_names() -> frozenset[ManifestPackage]:
+    """(ecosystem, lowercased package name) pairs already covered by some Skill
+    Tag's Detection Pattern. `sightings.record_sightings` diffs a repo's declared
+    packages against this to find genuinely unrecognized ones (round 8, ADR-0008)."""
+    return frozenset(
+        ManifestPackage(ecosystem=pkg.ecosystem, name=pkg.name.lower())
+        for skill in _raw_skills()
+        for pkg in skill.detection_pattern.manifest_packages
+    )
+
+
+def _serialize_skill_tag(skill: SkillTag) -> dict:
+    """The inverse of `_parse_detection_pattern` — the one place that knows how a
+    `SkillTag` maps back onto a `skills.json` record, so the on-disk shape has a
+    single reader and a single writer rather than two independently-maintained ones."""
+    pattern = skill.detection_pattern
+    return {
+        "name": skill.name,
+        "category": skill.category,
+        "description": skill.description,
+        "detection": {
+            "manifest_packages": [{"ecosystem": p.ecosystem, "name": p.name} for p in pattern.manifest_packages],
+            "file_extensions": list(pattern.file_extensions),
+            "config_files": list(pattern.config_files),
+            "content_markers": list(pattern.content_markers),
+        },
+    }
+
+
+def append_skill_tags(skills: list[SkillTag]) -> None:
+    """Appends new Skill Tags and bumps `version` once, in a single file write —
+    `taxonomy_growth`'s batch publish job calls this at most once per run, after
+    every entry it's publishing this run has cleared every guard (round 8,
+    ADR-0008). Clears every taxonomy cache afterward so the new entries (and their
+    embeddings, via the existing self-healing `_embeddings_cache`) are visible
+    immediately within this process. A separately running app process still needs
+    its own restart to see them — same as any other taxonomy edit today;
+    `_taxonomy_file` has no cross-process invalidation."""
+    data = json.loads(SKILLS_PATH.read_text(encoding="utf-8"))
+    data["skills"].extend(_serialize_skill_tag(s) for s in skills)
+    data["version"] += 1
+    SKILLS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _invalidate_caches()
+
+
+def _invalidate_caches() -> None:
+    _taxonomy_file.cache_clear()
+    _raw_skills.cache_clear()
+    _skill_index.cache_clear()
+    all_detection_pattern_config_files.cache_clear()
+    known_manifest_package_names.cache_clear()
+    _embeddings_cache.cache_clear()
 
 
 def is_known_skill(name: str) -> bool:

@@ -6,8 +6,8 @@ faked with fixture/canned data, embeddings and scoring run for real.
 import pytest
 
 from skillproof import taxonomy, verify_service
-from skillproof.models import Candidate, EvidenceCard
-from tests.fixtures.github_fixtures import wire_verified_candidate
+from skillproof.models import Candidate, EvidenceCard, Sighting
+from tests.fixtures.github_fixtures import OWNED_REPO, wire_verified_candidate
 
 
 def _connect(client, *, login="octodev", github_user_id=42, code="test-code") -> dict:
@@ -360,6 +360,39 @@ def test_verify_produces_declared_only_for_a_manifest_dependency_never_touched(c
     assert card["evidence_type"] == "declared_only"
     assert 0 < card["confidence_score"] < 0.3
     assert card["source_commits"] == []
+
+
+def test_verify_records_a_sighting_for_an_unrecognized_manifest_package(client, fake_github, db_session_factory):
+    """The fixture's requirements.txt declares 'gunicorn', which matches no Skill
+    Tag's Detection Pattern — round 8's Sighting recording must pick it up, while
+    'Django' (an already-known Skill Tag) produces no Sighting."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    client.post("/verify", json={"skills": ["FastAPI"]})
+
+    db = db_session_factory()
+    try:
+        sightings = db.query(Sighting).filter_by(candidate_id=candidate_id).all()
+        assert [(s.ecosystem, s.package_name) for s in sightings] == [("pip", "gunicorn")]
+        assert sightings[0].repo == OWNED_REPO.full_name
+    finally:
+        db.close()
+
+
+def test_reverify_does_not_duplicate_an_already_recorded_sighting(client, fake_github, db_session_factory):
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    client.post("/verify", json={"skills": ["FastAPI"]})
+    client.post("/verify", json={"skills": ["FastAPI"]})
+
+    db = db_session_factory()
+    try:
+        sightings = db.query(Sighting).filter_by(candidate_id=candidate_id).all()
+        assert len(sightings) == 1
+    finally:
+        db.close()
 
 
 def test_search_dedupes_a_candidate_forked_across_taxonomy_versions(client, fake_github, monkeypatch):

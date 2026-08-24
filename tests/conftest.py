@@ -38,6 +38,20 @@ def fake_groq():
 
 
 @pytest.fixture
+def isolated_taxonomy_file(tmp_path, monkeypatch):
+    """Test seam for taxonomy_growth: it writes real file mutations (new entries,
+    a version bump) to `taxonomy.SKILLS_PATH` — isolate them to a throwaway copy so
+    a test run never mutates the checked-in `skills.json`. Clears taxonomy's caches
+    before and after so no test leaks a stale in-memory taxonomy into another."""
+    temp_path = tmp_path / "skills.json"
+    temp_path.write_text(taxonomy.SKILLS_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(taxonomy, "SKILLS_PATH", temp_path)
+    taxonomy._invalidate_caches()
+    yield temp_path
+    taxonomy._invalidate_caches()
+
+
+@pytest.fixture
 def fake_embeddings():
     """Installs a FakeEmbeddingsBackend and clears taxonomy's embeddings cache so
     skill-tag vectors are recomputed through it instead of served from the real,

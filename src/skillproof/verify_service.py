@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 from sqlalchemy.orm import Session
 
-from skillproof import scoring, security, taxonomy
+from skillproof import scoring, security, sightings, taxonomy
 from skillproof.github_client import GitHubAuthError, GitHubClient
 from skillproof.ingestion import ingest_evidence
 from skillproof.models import Candidate, EvidenceCard
@@ -95,6 +95,7 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
             return
 
         candidate.needs_reconnect = False
+        sightings.record_sightings(db, candidate_id, evidence_bundle.manifests)
         db.commit()
 
         for skill in skills:

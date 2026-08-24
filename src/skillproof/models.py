@@ -74,3 +74,43 @@ class EvidenceCard(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
     candidate: Mapped[Candidate] = relationship(back_populates="evidence_cards")
+
+
+class Sighting(Base):
+    """A manifest-declared package matching no existing Skill Tag's Detection Pattern
+    (round 8, ADR-0008) — raw material for the self-extending taxonomy's batch publish
+    job (`taxonomy_growth.py`). Not evidence, never scored. A given (ecosystem,
+    package_name, candidate_id, repo) is recorded at most once, so a candidate
+    re-verifying repeatedly never inflates the distinct-candidate count the batch
+    job aggregates over."""
+
+    __tablename__ = "sightings"
+    __table_args__ = (
+        UniqueConstraint("ecosystem", "package_name", "candidate_id", "repo", name="uq_sighting_candidate_repo"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ecosystem: Mapped[str] = mapped_column(String, index=True)
+    package_name: Mapped[str] = mapped_column(String, index=True)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.candidate_id"), index=True)
+    repo: Mapped[str] = mapped_column(String)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SightingDecision(Base):
+    """A terminal outcome (published / rejected_duplicate / abstained) for one
+    (ecosystem, package_name) pair `taxonomy_growth.publish_new_skill_tags` has
+    already evaluated, so a package that keeps getting sighted isn't re-evaluated
+    (and re-billed against the LLM) on every batch run (round 8, ADR-0008). A
+    registry-existence miss is deliberately never recorded here — that check is
+    cheap and worth retrying, since the package might genuinely get published
+    later."""
+
+    __tablename__ = "sighting_decisions"
+    __table_args__ = (UniqueConstraint("ecosystem", "package_name", name="uq_sighting_decision"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ecosystem: Mapped[str] = mapped_column(String)
+    package_name: Mapped[str] = mapped_column(String)
+    decision: Mapped[str] = mapped_column(String)  # "published" | "rejected_duplicate" | "abstained"
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

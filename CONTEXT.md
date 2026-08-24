@@ -13,7 +13,7 @@ The public, unauthenticated, per-skill output record: a Confidence Score, the qu
 _Avoid_: Report, badge, profile
 
 **Skill Tag**:
-One entry from SkillProof's fixed, precomputed taxonomy of technical skills — scoped to skills with an authorable Detection Pattern. A purely theoretical/practice skill (e.g. System design) has no code footprint and isn't in the taxonomy until a non-GitHub verification path exists. Candidates claim skills by selecting Skill Tags via autocomplete, not by typing free text.
+One entry from SkillProof's precomputed taxonomy of technical skills — scoped to skills with an authorable Detection Pattern. The taxonomy is never user-editable, but it isn't static either: it grows automatically as new packages are sighted in Candidates' repos (see round 8 and ADR-0008). A purely theoretical/practice skill (e.g. System design) has no code footprint and isn't in the taxonomy until a non-GitHub verification path exists. Candidates claim skills by selecting Skill Tags via autocomplete, not by typing free text.
 _Avoid_: Skill claim (as a raw string), stated skill (as free text)
 
 **Confidence Score**:
@@ -27,6 +27,10 @@ _Avoid_: Signal (an Evidence Item is raw material a Signal is computed from, not
 **Detection Pattern**:
 A Skill Tag's fingerprint for automatic identification in a Candidate's repos — a package identifier, import pattern, API surface marker, config filename, or (for language Skill Tags) a file extension / ecosystem-manifest marker. Drives the Presence and Volume Signals. A Skill Tag with no authorable Detection Pattern doesn't belong in the taxonomy.
 _Avoid_: Keyword, trigger
+
+**Sighting**:
+A recorded occurrence of a manifest package that matches no existing Skill Tag's Detection Pattern, captured during a Candidate's `/verify` ingestion (ecosystem, package name, candidate, repo) as raw material for the self-extending taxonomy's batch publish step. Not itself evidence, and never scored — it only feeds the taxonomy-growth job (round 8, ADR-0008).
+_Avoid_: Evidence Item (a Sighting is about a package unrecognized by the taxonomy, not qualifying evidence for a Skill Tag that already exists), unknown dependency
 
 **Signal**:
 One of four measurable components that combine into a Confidence Score. Presence and Volume are deterministic (a Detection Pattern match in a manifest/file-extension lookup, and a count of commits touching matched files). Depth is the one Signal that uses embeddings — comparing PR comments and commit messages from Volume-qualifying commits against the Skill Tag's canonical description, since that's natural language against natural language, the one place embeddings are actually reliable here. A commit message's similarity is discounted (×0.6) relative to a PR comment's before Depth's top-3 selection, since a commit message is Candidate-authored and self-describable, while a PR comment is meaningfully harder to game. Span measures the date range of the full qualifying evidence set.
@@ -93,10 +97,20 @@ _Avoid_: Public/private (the card is always public; this flag only controls disc
 - Candidate authentication moves from implicit trust to an actual session: `GET /auth/github/callback` sets an HttpOnly session cookie (opaque session id → `candidate_id`) and redirects into the frontend, rather than returning the `candidate_id` as a bare JSON body. `POST /verify` and the `searchable` toggle now require that session and derive `candidate_id` from it server-side — they no longer trust a client-supplied `candidate_id`, which was previously sufficient to trigger verification or flip `searchable` on someone else's behalf, since `candidate_id` is intentionally public (embedded in Evidence Card URLs). This is what actually makes the Candidate term's "authenticated actor" claim true; see ADR-0006.
 - The frontend is served single-origin: FastAPI serves the built app, so the session cookie stays same-site (no cross-site `SameSite=None`/HTTPS-only cookie requirement). A dev-time Vite server may still front it for HMR, proxying API calls to FastAPI rather than running as a permanently separate origin.
 
+## Resolved (round 8)
+
+- The self-extending taxonomy (previously deferred in the Notes below) is now scoped. `/verify`'s existing manifest fetch records a Sighting for any package matching no existing Skill Tag's Detection Pattern — at no added cost or latency to `/verify` itself, and with no synchronous LLM call.
+- A separate batch process, run on a fixed cadence (e.g. nightly) rather than continuously, evaluates Sightings once they've been seen across a minimum number of distinct Candidates, and publishes new Skill Tags directly — there is no human approval step. Batching (instead of publishing continuously) exists specifically to bound how often `taxonomy_version` bumps, since a bump forks every Evidence Card globally (ADR-0005), not just cards for the newly added tag.
+- In place of human review, publishing is gated by: a deterministic check that the sighted package actually exists on its ecosystem's real registry; a deterministic exact/case-insensitive name dedup against the existing taxonomy; and an LLM check for semantic duplicates against existing entries' canonical descriptions, not just their names, before it drafts anything new. The LLM may also abstain — "not a real claimable skill" is a valid outcome for a Sighting that clears the deterministic checks — and its category choice is constrained to the taxonomy's existing five categories; it cannot mint new ones.
+- A published Skill Tag's Detection Pattern is populated directly from the Sighting itself (the sighted ecosystem + package name become its `manifest_packages` entry) — the LLM only drafts the category and canonical description. The batch job also extends the precomputed embeddings cache for each newly published tag, since no human remains to run that step manually.
+- A bad entry that slips through despite the guards is corrected the same way any hand-curated taxonomy mistake is today: a manual edit to `skills.json` and a version bump. There is no separate retraction/undo mechanism for auto-added entries.
+
+See ADR-0008.
+
 ## Notes
 
 - Recruiter has exactly one capability (`/search`) and no account — see the Recruiter, Searchable, and Explanation terms above.
 - `/search` takes a hard result cap (e.g. `limit=50`), not full pagination — an implementation default, not a design branch.
 - `/search` caps a query at 8 Skill Tags (rejected with 400 if exceeded), mirroring `/verify`'s existing 8-skill cap. Results are ranked by the average Confidence Score across only the queried skills; see ADR-0007 for the AND semantics and per-skill result breakdown.
 - Explicitly out of scope: recruiter accounts/auth, saved searches, candidate messaging, applicant tracking, resume upload/hosting — Evidence Cards replace resumes, so serving resumes would undercut the product's premise.
-- Two follow-on features were scoped out of this pass, deferred to their own future specs: a **self-extending taxonomy** (parsing unknown manifest packages, proposing new Skill Tags via an LLM, human-approved before entering the scored path) and a **Depth Interview** (an unscored, LLM-conducted conversational artifact for skills with no code footprint — code-anchored, probing a specific commit, or experience-anchored, probing a Candidate's self-described private/internship work). Neither changes the current model; both get their own grilling session before further design. Multi-platform evidence sourcing (LeetCode, HackerRank, etc.) is a further-out idea, not yet scoped at all.
+- The self-extending taxonomy is scoped as of round 8 above (see ADR-0008) — parsing unknown manifest packages into Sightings, then auto-publishing new Skill Tags via deterministic registry/dedup checks plus an LLM draft-or-abstain step, with no human approval gate. One follow-on feature remains deferred without its own scoping session yet: a **Depth Interview** (an unscored, LLM-conducted conversational artifact for skills with no code footprint — code-anchored, probing a specific commit, or experience-anchored, probing a Candidate's self-described private/internship work); it gets its own grilling session before further design. Multi-platform evidence sourcing (LeetCode, HackerRank, etc.) is a further-out idea, not yet scoped at all.

@@ -8,6 +8,7 @@ from skillproof.db import SessionLocal, get_db
 from skillproof.github_client import GitHubClient, RealGitHubClient
 from skillproof.groq_client import GroqClient, RealGroqClient
 from skillproof.models import Candidate, CandidateSession
+from skillproof.registry_client import RealRegistryClient, RegistryClient
 
 
 @lru_cache
@@ -18,6 +19,11 @@ def get_github_client() -> GitHubClient:
 @lru_cache
 def get_groq_client() -> GroqClient:
     return RealGroqClient()
+
+
+@lru_cache
+def get_registry_client() -> RegistryClient:
+    return RealRegistryClient()
 
 
 def get_session_factory():
