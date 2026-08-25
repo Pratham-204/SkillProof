@@ -16,6 +16,10 @@ class CandidateOut(BaseModel):
     needs_reconnect: bool
 
 
+class SearchableUpdate(BaseModel):
+    searchable: bool
+
+
 class VerifyRequest(BaseModel):
     skills: list[str] = Field(min_length=1)
     searchable: bool | None = None

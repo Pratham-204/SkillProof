@@ -32,6 +32,35 @@ def test_connect_creates_then_reuses_candidate_identity(client, fake_github):
     assert first["github_login"] == "octodev"
 
 
+def test_toggle_searchable_updates_and_persists(client, fake_github):
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    connected = _connect(client)
+    assert connected["searchable"] is False
+
+    response = client.patch("/auth/github/me/searchable", json={"searchable": True})
+
+    assert response.status_code == 200
+    assert response.json()["searchable"] is True
+    assert client.get("/auth/github/me").json()["searchable"] is True
+
+
+def test_toggle_searchable_can_turn_off_again(client, fake_github):
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    _connect(client)
+    client.patch("/auth/github/me/searchable", json={"searchable": True})
+
+    response = client.patch("/auth/github/me/searchable", json={"searchable": False})
+
+    assert response.status_code == 200
+    assert response.json()["searchable"] is False
+
+
+def test_toggle_searchable_requires_a_session(client):
+    response = client.patch("/auth/github/me/searchable", json={"searchable": True})
+
+    assert response.status_code == 401
+
+
 def test_verify_rejects_unknown_skill_tag(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     _connect(client)

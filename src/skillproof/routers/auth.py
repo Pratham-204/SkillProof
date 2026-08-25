@@ -8,7 +8,7 @@ from skillproof.db import get_db
 from skillproof.deps import get_current_candidate, get_github_client
 from skillproof.github_client import GitHubClient
 from skillproof.models import Candidate, CandidateSession
-from skillproof.schemas import CandidateOut
+from skillproof.schemas import CandidateOut, SearchableUpdate
 
 router = APIRouter(prefix="/auth/github", tags=["auth"])
 
@@ -77,4 +77,17 @@ def callback(
 
 @router.get("/me", response_model=CandidateOut)
 def me(candidate: Candidate = Depends(get_current_candidate)) -> CandidateOut:
+    return CandidateOut.model_validate(candidate)
+
+
+@router.patch("/me/searchable", response_model=CandidateOut)
+def update_searchable(
+    payload: SearchableUpdate,
+    candidate: Candidate = Depends(get_current_candidate),
+    db: Session = Depends(get_db),
+) -> CandidateOut:
+    """Lets a Candidate flip `searchable` on its own, without a full `/verify`
+    call — identity comes from the session (ADR-0006), same as `/verify`."""
+    candidate.searchable = payload.searchable
+    db.commit()
     return CandidateOut.model_validate(candidate)
