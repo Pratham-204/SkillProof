@@ -8,6 +8,10 @@ Verifies a developer's self-reported skills against their public GitHub activity
 The single authenticated actor in MVP — a developer who connects their GitHub account and claims skills to be verified.
 _Avoid_: User, developer (when a more specific term is meant), account holder
 
+**Candidate Dashboard**:
+The authenticated landing page a returning Candidate reaches after login — replaces the earlier behavior of redirecting straight into `/claim`. Shows the same latest-per-skill Evidence Card set `/evidence-card/{candidate_id}` already returns, the Candidate's own shareable public Evidence Card link, and their `searchable` toggle. Distinct from the Evidence Card page itself, which stays deliberately session-blind (see round 10).
+_Avoid_: Profile, account page (this is specifically the Candidate's own view of their Evidence Cards, not a broader account-settings surface)
+
 **Evidence Card**:
 The public, unauthenticated, per-skill output record: a Confidence Score, the qualifying GitHub evidence that produced it, and an optional Explanation. Retrieved at `/evidence-card/{candidate_id}` with no auth required.
 _Avoid_: Report, badge, profile
@@ -111,6 +115,15 @@ See ADR-0008.
 
 - PR review comments are deliberately never Depth evidence for `language`-category Skill Tags (Python, JavaScript, TypeScript, Go, Rust, …). A comment has no file path of its own, so it can only match a Detection Pattern via `content_markers`/`manifest_packages` — and every language entry's `content_markers` is intentionally left empty, since generic syntax fragments (e.g. `"def "`, `"self."`) would false-positive on almost any code-review comment quoting a snippet. This is a taxonomy-design choice, not a gap to fill: language Skill Tags accrue Volume/Depth from commits (matched via file extension) only; PR comments remain a source of evidence for Skill Tags with a distinctive, low-noise API surface (frameworks/tools/infra) instead.
 - The `verified`-with-zero-qualifying-items fallback explanation (see the Evidence Item term) previously used the same wording as `declared_only` — "no individual commit or PR comment qualified as evidence" — even though a `verified` card has real Volume-qualifying commits behind it; they just didn't clear Depth's 0.35 floor. The two states now get distinct wording so the explanation never contradicts `evidence_type`.
+
+## Resolved (round 10)
+
+- A Candidate Dashboard (see term above) becomes the authenticated landing experience: `Home`'s post-login redirect target moves from `/claim` to this new page, and "claim more skills" becomes an action reachable from the dashboard rather than the automatic post-login destination.
+- The dashboard surfaces the same latest-`taxonomy_version`-per-skill card set every other Evidence Card view already uses — no new versioning/history browsing surface, matching the round-2 "no history/versioning in MVP" decision.
+- The dashboard is a new, separate page/component rather than an owner-mode branch added to `PublicEvidenceCard` — that page's existing invariant (identical output regardless of viewer/session) stays intact.
+- `searchable` becomes toggleable on its own via a new small authenticated endpoint, rather than only settable as a field on a `/verify` call as today.
+- A recruiter-facing portal (accounts, login, saved candidates) would be a deliberate reversal of the existing "no Recruiter account" decision (see Recruiter term and Notes below) — explicitly out of scope for this round and deferred to its own future grilling session; nothing here assumes it exists.
+- Frontend navigation gets persistent, viewer-agnostic nav chrome on every page, and `ScanReveal`'s claimed-skills tracking moves from trusting router `location.state` (silently lost on back-navigation or a refresh) to deriving the expected set from the Candidate's own `processing`-status cards instead — addressing the actual cause of state loss on back-navigation, not just adding a link. Sign-out/session termination is explicitly out of scope for this pass.
 
 ## Notes
 
