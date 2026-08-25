@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
@@ -13,5 +13,13 @@ export default defineConfig({
     proxy: Object.fromEntries(
       API_PATHS.map((path) => [path, { target: 'http://localhost:8000', changeOrigin: true }]),
     ),
+  },
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    globals: true,
+    // Vitest's default `forks` pool hangs waiting on worker processes in some
+    // sandboxed/CI environments that restrict forking; `threads` doesn't.
+    pool: 'threads',
   },
 })

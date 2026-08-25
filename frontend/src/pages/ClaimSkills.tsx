@@ -1,34 +1,30 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { GITHUB_LOGIN_URL, MAX_CLAIMED_SKILLS, getMe, listSkills, verify, type Candidate, type SkillTag } from '../api'
+import { GITHUB_LOGIN_URL, MAX_CLAIMED_SKILLS, listSkills, verify, type SkillTag } from '../api'
+import { useRequireCandidate } from '../hooks/useRequireCandidate'
 import SkillPicker from '../components/SkillPicker'
 
 export default function ClaimSkills() {
   const navigate = useNavigate()
-  const [candidate, setCandidate] = useState<Candidate | null>(null)
+  const { candidate, loading: authLoading } = useRequireCandidate()
   const [skills, setSkills] = useState<SkillTag[]>([])
   const [selected, setSelected] = useState<string[]>([])
   const [searchable, setSearchable] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [skillsLoading, setSkillsLoading] = useState(true)
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getMe(), listSkills()]).then(([me, skillList]) => {
+    listSkills().then((skillList) => {
       if (cancelled) return
-      if (!me) {
-        navigate('/', { replace: true })
-        return
-      }
-      setCandidate(me)
       setSkills(skillList)
-      setLoading(false)
+      setSkillsLoading(false)
     })
     return () => {
       cancelled = true
     }
-  }, [navigate])
+  }, [])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -44,7 +40,7 @@ export default function ClaimSkills() {
     }
   }
 
-  if (loading) return null
+  if (authLoading || skillsLoading) return null
 
   if (candidate?.needs_reconnect) {
     return (

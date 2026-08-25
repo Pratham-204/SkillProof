@@ -1,7 +1,8 @@
 import { motion } from 'framer-motion'
 import { useEffect, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
-import { GITHUB_LOGIN_URL, getEvidenceCard, getMe, type Candidate, type EvidenceCard as EvidenceCardType } from '../api'
+import { useLocation } from 'react-router-dom'
+import { GITHUB_LOGIN_URL, getEvidenceCard, type EvidenceCard as EvidenceCardType } from '../api'
+import { useRequireCandidate } from '../hooks/useRequireCandidate'
 import EvidenceCardList from '../components/EvidenceCardList'
 
 type Phase = 'idle' | 'scanning' | 'revealing' | 'complete'
@@ -13,11 +14,10 @@ const MIN_SCAN_MS = 1500
 
 export default function ScanReveal() {
   const location = useLocation()
-  const navigate = useNavigate()
   const claimedSkills = (location.state as { skills?: string[] } | null)?.skills ?? []
 
+  const { candidate } = useRequireCandidate()
   const [phase, setPhase] = useState<Phase>('idle')
-  const [candidate, setCandidate] = useState<Candidate | null>(null)
   const candidateId = candidate?.candidate_id ?? null
   const [scannedRepos, setScannedRepos] = useState<string[]>([])
   const [cards, setCards] = useState<EvidenceCardType[]>([])
@@ -26,22 +26,11 @@ export default function ScanReveal() {
   const verificationDone = useRef(false)
   const revealedSkills = useRef<Set<string>>(new Set())
 
-  // Resolve identity once, then start the phase machine.
+  // Starts the phase machine once identity resolves (`phase === 'idle'` keeps
+  // rendering suppressed below until then, same as the old loading gate).
   useEffect(() => {
-    let cancelled = false
-    getMe().then((me) => {
-      if (cancelled) return
-      if (!me) {
-        navigate('/', { replace: true })
-        return
-      }
-      setCandidate(me)
-      setPhase('scanning')
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [navigate])
+    if (candidate) setPhase('scanning')
+  }, [candidate])
 
   function tryEnterRevealing() {
     if (scanFloorPassed.current && verificationDone.current) {
