@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import AppHeader from './components/AppHeader'
 import Home from './pages/Home'
 import Dashboard from './pages/Dashboard'
 import ClaimSkills from './pages/ClaimSkills'
@@ -13,6 +14,7 @@ import RecruiterSearch from './pages/RecruiterSearch'
 export default function App() {
   return (
     <BrowserRouter>
+      <AppHeader />
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/dashboard" element={<Dashboard />} />
