@@ -11,7 +11,7 @@ export default function Home() {
     getMe().then((candidate) => {
       if (cancelled) return
       if (candidate) {
-        navigate('/claim', { replace: true })
+        navigate('/dashboard', { replace: true })
       } else {
         setChecking(false)
       }

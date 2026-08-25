@@ -70,6 +70,17 @@ export async function getMe(): Promise<Candidate | null> {
   return response.json()
 }
 
+export async function updateSearchable(searchable: boolean): Promise<Candidate> {
+  const response = await fetch('/auth/github/me/searchable', {
+    method: 'PATCH',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ searchable }),
+  })
+  if (!response.ok) throw new Error(`PATCH /auth/github/me/searchable failed: ${response.status}`)
+  return response.json()
+}
+
 export async function listSkills(): Promise<SkillTag[]> {
   const response = await fetch('/skills', { credentials: 'same-origin' })
   if (!response.ok) throw new Error(`GET /skills failed: ${response.status}`)
