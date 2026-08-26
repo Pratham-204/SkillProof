@@ -173,13 +173,27 @@ def get_skill(name: str) -> SkillTag:
     return tag
 
 
+def _cache_matches_active_backend(cached: np.lib.npyio.NpzFile) -> bool:
+    """True if the on-disk cache was produced by whatever backend/model is active
+    now. A cache written before this key existed has no "backend_key" entry at
+    all — that's a pre-existing checked-in cache from the only real backend this
+    codebase has ever had (SentenceTransformerBackend), so it's treated as a
+    match rather than forced to recompute on every process this ships to."""
+    if "backend_key" not in cached.files:
+        return True
+    return str(cached["backend_key"][0]) == embeddings.backend_cache_key()
+
+
 @lru_cache
 def _embeddings_cache() -> dict[str, np.ndarray]:
     """Skill Tag embeddings, computed once locally and cached to disk.
 
-    Recomputing per-request would be wasteful; a stale cache (taxonomy
-    edited since the cache was written) is detected by comparing the
-    cached skill names against the current taxonomy and recomputed.
+    Recomputing per-request would be wasteful; a stale cache is detected and
+    recomputed in two independent ways: the taxonomy was edited since the cache
+    was written (cached skill names no longer match), or the active embeddings
+    backend/model no longer matches whatever produced the cache (see
+    _cache_matches_active_backend) — guarding against silently reusing vectors
+    computed in a different embedding space after a future backend swap.
 
     The disk cache holds real-model vectors only — both reading and writing it
     are skipped whenever a non-real embeddings backend is installed, so a test
@@ -191,13 +205,18 @@ def _embeddings_cache() -> dict[str, np.ndarray]:
     if embeddings.using_real_backend() and EMBEDDINGS_CACHE_PATH.exists():
         cached = np.load(EMBEDDINGS_CACHE_PATH, allow_pickle=False)
         cached_names = list(cached["names"])
-        if cached_names == names:
+        if cached_names == names and _cache_matches_active_backend(cached):
             return {name: cached[f"vec_{i}"] for i, name in enumerate(names)}
 
     vectors = embeddings.embed_batch([f"{s.name}: {s.description}" for s in skills])
     if embeddings.using_real_backend():
         save_kwargs = {f"vec_{i}": vectors[i] for i in range(len(names))}
-        np.savez(EMBEDDINGS_CACHE_PATH, names=np.array(names), **save_kwargs)
+        np.savez(
+            EMBEDDINGS_CACHE_PATH,
+            names=np.array(names),
+            backend_key=np.array([embeddings.backend_cache_key()]),
+            **save_kwargs,
+        )
     return dict(zip(names, vectors))
 
 

@@ -20,10 +20,22 @@ class EmbeddingsBackend(ABC):
     """What embed_batch needs to turn text into vectors — the seam a test
     substitutes to get fixed, known vectors instead of a live model's output.
     taxonomy.py's disk-cached skill-tag embeddings are bypassed while a
-    non-real backend is installed — see using_real_backend()."""
+    non-real (i.e. FakeEmbeddingsBackend) backend is installed — see
+    using_real_backend()."""
 
     @abstractmethod
     def embed_batch(self, texts: list[str]) -> np.ndarray: ...
+
+    @property
+    def cache_key(self) -> str:
+        """Identifies this backend + model combination. taxonomy.py's on-disk
+        embeddings cache stores this alongside the cached vectors and recomputes
+        whenever the active backend's cache_key no longer matches what's on disk,
+        so a future backend/model swap never silently reuses vectors computed in
+        a different embedding space. Not abstract: only backends that actually use
+        the disk cache (see using_real_backend()) need a meaningful override —
+        FakeEmbeddingsBackend never does, so it inherits this default unused."""
+        return type(self).__name__
 
 
 class SentenceTransformerBackend(EmbeddingsBackend):
@@ -31,6 +43,10 @@ class SentenceTransformerBackend(EmbeddingsBackend):
 
     def embed_batch(self, texts: list[str]) -> np.ndarray:
         return np.asarray(_model().encode(texts, normalize_embeddings=False))
+
+    @property
+    def cache_key(self) -> str:
+        return f"sentence-transformer:{get_settings().embedding_model_name}"
 
 
 @dataclass
@@ -64,7 +80,18 @@ def set_backend(backend: EmbeddingsBackend) -> None:
 
 
 def using_real_backend() -> bool:
-    return isinstance(_backend, SentenceTransformerBackend)
+    """True for any backend except the test-only FakeEmbeddingsBackend — i.e. any
+    backend whose vectors are safe to persist to and read from taxonomy.py's disk
+    cache. Deliberately not an isinstance check against one specific real backend
+    class, so a future non-local backend also gets to use the disk cache."""
+    return not isinstance(_backend, FakeEmbeddingsBackend)
+
+
+def backend_cache_key() -> str:
+    """The active backend's cache_key — what taxonomy.py's disk cache compares
+    against the key stored alongside its cached vectors to detect a backend/model
+    change."""
+    return _backend.cache_key
 
 
 def embed(text: str) -> np.ndarray:
