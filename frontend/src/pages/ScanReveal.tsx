@@ -24,6 +24,10 @@ export default function ScanReveal() {
   // is silently empty on refresh, back/forward, or a direct visit. `null`
   // means "not yet fetched" and holds off the completion check below.
   const [expectedSkills, setExpectedSkills] = useState<string[] | null>(null)
+  // Flips true once the "done" handler's own backfill fetch (below) has
+  // resolved — the authoritative post-run read that closes the window where
+  // `expectedSkills` undercounted.
+  const [doneCardsSettled, setDoneCardsSettled] = useState(false)
 
   const scanFloorPassed = useRef(false)
   const verificationDone = useRef(false)
@@ -92,14 +96,21 @@ export default function ScanReveal() {
       verificationDone.current = true
       tryEnterRevealing()
       // A skill can fail before ever producing a "reveal" event — make sure
-      // its (failed) card still shows up once verification is over.
-      getEvidenceCard(candidateId).then((evidence) => {
-        setCards((prev) => {
-          const known = new Set(prev.map((c) => c.skill))
-          const missing = evidence.cards.filter((c) => !known.has(c.skill))
-          return missing.length ? [...prev, ...missing] : prev
+      // its (failed) card still shows up once verification is over. This
+      // fetch is also the last word on `expectedSkills` potentially having
+      // undercounted (a skill can finish between that snapshot firing and
+      // resolving, or its "reveal" event can be missed entirely — the
+      // progress bus doesn't replay events published before this page
+      // subscribed) — so completion below waits on it too.
+      getEvidenceCard(candidateId)
+        .then((evidence) => {
+          setCards((prev) => {
+            const known = new Set(prev.map((c) => c.skill))
+            const missing = evidence.cards.filter((c) => !known.has(c.skill))
+            return missing.length ? [...prev, ...missing] : prev
+          })
         })
-      })
+        .finally(() => setDoneCardsSettled(true))
       source.close()
     })
 
@@ -110,14 +121,16 @@ export default function ScanReveal() {
   // Waits on expectedSkills to resolve before deciding anything (it starts
   // `null`), then falls back to "done + at least one card" if it came back
   // empty (e.g. verification finished before this page's fetch landed)
-  // rather than an exact count that could never match.
+  // rather than an exact count that could never match. Also waits on
+  // doneCardsSettled so a count that happened to match early can't flip this
+  // to `complete` before the "done" handler's own authoritative fetch lands.
   useEffect(() => {
-    if (phase !== 'revealing' || !verificationDone.current) return
+    if (phase !== 'revealing' || !verificationDone.current || !doneCardsSettled) return
     if (expectedSkills === null) return
     if (expectedSkills.length > 0 && cards.length < expectedSkills.length) return
     if (cards.length === 0) return
     setPhase('complete')
-  }, [phase, cards, expectedSkills])
+  }, [phase, cards, expectedSkills, doneCardsSettled])
 
   if (phase === 'idle') return null
 
