@@ -1,6 +1,5 @@
 import { motion } from 'framer-motion'
 import { useEffect, useRef, useState } from 'react'
-import { useLocation } from 'react-router-dom'
 import { GITHUB_LOGIN_URL, getEvidenceCard, type EvidenceCard as EvidenceCardType } from '../api'
 import { useRequireCandidate } from '../hooks/useRequireCandidate'
 import EvidenceCardList from '../components/EvidenceCardList'
@@ -13,14 +12,18 @@ type Phase = 'idle' | 'scanning' | 'revealing' | 'complete'
 const MIN_SCAN_MS = 1500
 
 export default function ScanReveal() {
-  const location = useLocation()
-  const claimedSkills = (location.state as { skills?: string[] } | null)?.skills ?? []
-
   const { candidate } = useRequireCandidate()
   const [phase, setPhase] = useState<Phase>('idle')
   const candidateId = candidate?.candidate_id ?? null
   const [scannedRepos, setScannedRepos] = useState<string[]>([])
   const [cards, setCards] = useState<EvidenceCardType[]>([])
+  // The skills this run is verifying, derived from the Candidate's own
+  // Evidence Cards (status "processing" is stamped synchronously by
+  // start_verification before this page can even mount) rather than router
+  // `location.state`, which only survives one specific in-app navigation and
+  // is silently empty on refresh, back/forward, or a direct visit. `null`
+  // means "not yet fetched" and holds off the completion check below.
+  const [expectedSkills, setExpectedSkills] = useState<string[] | null>(null)
 
   const scanFloorPassed = useRef(false)
   const verificationDone = useRef(false)
@@ -37,6 +40,18 @@ export default function ScanReveal() {
       setPhase((p) => (p === 'scanning' ? 'revealing' : p))
     }
   }
+
+  useEffect(() => {
+    if (!candidateId) return
+    let cancelled = false
+    getEvidenceCard(candidateId).then((evidence) => {
+      if (cancelled) return
+      setExpectedSkills(evidence.cards.filter((c) => c.status === 'processing').map((c) => c.skill))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [candidateId])
 
   // The scan floor: a plain timer, independent of how fast real events arrive.
   useEffect(() => {
@@ -91,16 +106,18 @@ export default function ScanReveal() {
     return () => source.close()
   }, [candidateId])
 
-  // Once the run is done and every claimed card has arrived, we're complete.
-  // Falls back to "done + at least one card" if claimedSkills is unknown
-  // (e.g. this page was reached directly rather than via the claim form,
-  // losing router state) rather than an exact count that could never match.
+  // Once the run is done and every expected card has arrived, we're complete.
+  // Waits on expectedSkills to resolve before deciding anything (it starts
+  // `null`), then falls back to "done + at least one card" if it came back
+  // empty (e.g. verification finished before this page's fetch landed)
+  // rather than an exact count that could never match.
   useEffect(() => {
     if (phase !== 'revealing' || !verificationDone.current) return
-    if (claimedSkills.length > 0 && cards.length < claimedSkills.length) return
+    if (expectedSkills === null) return
+    if (expectedSkills.length > 0 && cards.length < expectedSkills.length) return
     if (cards.length === 0) return
     setPhase('complete')
-  }, [phase, cards, claimedSkills.length])
+  }, [phase, cards, expectedSkills])
 
   if (phase === 'idle') return null
 

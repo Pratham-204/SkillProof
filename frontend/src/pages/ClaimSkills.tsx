@@ -33,7 +33,7 @@ export default function ClaimSkills() {
     setError(null)
     try {
       await verify(selected, searchable)
-      navigate('/scan', { state: { skills: selected } })
+      navigate('/scan')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong starting verification.')
       setSubmitting(false)
