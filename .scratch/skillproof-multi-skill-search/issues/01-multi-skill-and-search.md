@@ -4,16 +4,16 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `GET /search` accepts `skill` as a repeated query parameter (up to 8 distinct values); more than 8 distinct values is rejected with 400.
-- [ ] A result includes a candidate only if they have a qualifying, `searchable`, `status="complete"` Evidence Card for every selected skill (AND), respecting the existing per-skill `taxonomy_version` dedup (latest version per candidate per skill).
-- [ ] A `declared_only` card for a selected skill still counts as a match — it is not excluded from AND results.
-- [ ] Each result exposes a per-skill breakdown (`skill`, `confidence_score`, `evidence_type` for every selected skill) plus an explicit `average_score` computed only over the selected skills (never a candidate's other claimed skills).
-- [ ] Results sort descending by `average_score`.
-- [ ] A duplicate skill value in the query is treated as a single occurrence — doesn't trip the 8-skill cap or double-weight the average.
-- [ ] The Recruiter search page's Skill Tag picker allows selecting up to 8 skills and renders each result's per-skill breakdown and average score, reusing the existing verified/`declared_only` visual language (`lib/evidence.ts`).
-- [ ] Backend tests cover: AND-exclusion of partial matches, `declared_only` inclusion, `average_score` computed over only the queried skills (not a candidate's full skill set), 8-skill cap rejection (400), duplicate-skill handling, and the existing taxonomy-version-fork dedup extended to a 2-skill query.
+- [x] `GET /search` accepts `skill` as a repeated query parameter (up to 8 distinct values); more than 8 distinct values is rejected with 400.
+- [x] A result includes a candidate only if they have a qualifying, `searchable`, `status="complete"` Evidence Card for every selected skill (AND), respecting the existing per-skill `taxonomy_version` dedup (latest version per candidate per skill).
+- [x] A `declared_only` card for a selected skill still counts as a match — it is not excluded from AND results.
+- [x] Each result exposes a per-skill breakdown (`skill`, `confidence_score`, `evidence_type` for every selected skill) plus an explicit `average_score` computed only over the selected skills (never a candidate's other claimed skills).
+- [x] Results sort descending by `average_score`.
+- [x] A duplicate skill value in the query is treated as a single occurrence — doesn't trip the 8-skill cap or double-weight the average.
+- [x] The Recruiter search page's Skill Tag picker allows selecting up to 8 skills and renders each result's per-skill breakdown and average score, reusing the existing verified/`declared_only` visual language (`lib/evidence.ts`).
+- [x] Backend tests cover: AND-exclusion of partial matches, `declared_only` inclusion, `average_score` computed over only the queried skills (not a candidate's full skill set), 8-skill cap rejection (400), duplicate-skill handling, and the existing taxonomy-version-fork dedup extended to a 2-skill query.
 
 ## Comments
 

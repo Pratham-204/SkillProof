@@ -4,8 +4,8 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A single shared hook (or equivalent utility) resolves the current Candidate via `getMe()` and redirects to `/` when unauthenticated.
-- [ ] `ClaimSkills` and `ScanReveal` both use the shared hook in place of their own duplicated logic; their existing behavior (redirect-if-logged-out, loading state while resolving) is unchanged.
-- [ ] The hook's shape is generic enough that the Candidate Dashboard (a later ticket) can consume it directly rather than writing a third copy of the same pattern.
+- [x] A single shared hook (or equivalent utility) resolves the current Candidate via `getMe()` and redirects to `/` when unauthenticated.
+- [x] `ClaimSkills` and `ScanReveal` both use the shared hook in place of their own duplicated logic; their existing behavior (redirect-if-logged-out, loading state while resolving) is unchanged.
+- [x] The hook's shape is generic enough that the Candidate Dashboard (a later ticket) can consume it directly rather than writing a third copy of the same pattern.

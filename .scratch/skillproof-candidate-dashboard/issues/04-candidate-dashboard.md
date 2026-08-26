@@ -4,13 +4,13 @@
 
 **Blocked by:** 01 (shared Candidate hook), 02 (frontend test infrastructure), 03 (searchable toggle endpoint)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A logged-in Candidate visiting the dashboard sees every skill they've had scored, using the same latest-`taxonomy_version`-per-skill data `/evidence-card/{candidate_id}` already returns — no new backend read endpoint.
-- [ ] The dashboard shows a copyable link to the Candidate's own public Evidence Card.
-- [ ] The dashboard includes a `searchable` toggle wired to the endpoint from ticket 03; toggling it updates immediately and reflects the persisted value.
-- [ ] The dashboard offers a "claim more skills" action leading to the existing claim flow.
-- [ ] A Candidate with `needs_reconnect` set sees the existing reconnect-prompt treatment (as already shown elsewhere in the app).
-- [ ] `Home`'s post-login redirect target changes from the claim flow to this dashboard; `Home`'s unauthenticated behavior (landing copy, Connect GitHub) is unchanged.
-- [ ] The dashboard resolves the current Candidate via the shared hook from ticket 01, not a new duplicate of that logic.
-- [ ] Covered by component/interaction tests (using ticket 02's seam) asserting: cards render from the Candidate's data, the searchable toggle calls the endpoint and reflects the resulting state, and a logged-in visit to `Home` redirects to the dashboard.
+- [x] A logged-in Candidate visiting the dashboard sees every skill they've had scored, using the same latest-`taxonomy_version`-per-skill data `/evidence-card/{candidate_id}` already returns — no new backend read endpoint.
+- [x] The dashboard shows a copyable link to the Candidate's own public Evidence Card.
+- [x] The dashboard includes a `searchable` toggle wired to the endpoint from ticket 03; toggling it updates immediately and reflects the persisted value.
+- [x] The dashboard offers a "claim more skills" action leading to the existing claim flow.
+- [x] A Candidate with `needs_reconnect` set sees the existing reconnect-prompt treatment (as already shown elsewhere in the app).
+- [x] `Home`'s post-login redirect target changes from the claim flow to this dashboard; `Home`'s unauthenticated behavior (landing copy, Connect GitHub) is unchanged.
+- [x] The dashboard resolves the current Candidate via the shared hook from ticket 01, not a new duplicate of that logic.
+- [x] Covered by component/interaction tests (using ticket 02's seam) asserting: cards render from the Candidate's data, the searchable toggle calls the endpoint and reflects the resulting state, and a logged-in visit to `Home` redirects to the dashboard.

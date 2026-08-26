@@ -4,8 +4,8 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Vitest, `@testing-library/react`, `@testing-library/jest-dom`, and `@testing-library/user-event` are added as devDependencies and configured against the existing Vite config.
-- [ ] A test script (e.g. `npm test`) runs the suite and passes.
-- [ ] At least one smoke test exercises an existing component (renders it and asserts on visible output), proving the seam actually executes component code — not just that configuration loads without error.
+- [x] Vitest, `@testing-library/react`, `@testing-library/jest-dom`, and `@testing-library/user-event` are added as devDependencies and configured against the existing Vite config.
+- [x] A test script (e.g. `npm test`) runs the suite and passes.
+- [x] At least one smoke test exercises an existing component (renders it and asserts on visible output), proving the seam actually executes component code — not just that configuration loads without error.

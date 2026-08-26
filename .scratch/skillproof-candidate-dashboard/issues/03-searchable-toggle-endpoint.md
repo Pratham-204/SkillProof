@@ -4,10 +4,10 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A new authenticated endpoint updates the current Candidate's `searchable` flag, deriving identity from the session exactly as `/verify` does — never from a client-supplied `candidate_id`.
-- [ ] Calling it without a valid session returns 401.
-- [ ] Calling it persists the new value; a subsequent read of the Candidate reflects the change.
-- [ ] `/verify`'s existing `searchable` field is unaffected and continues to work as it does today.
-- [ ] Tested through the existing FastAPI `TestClient` seam (`tests/conftest.py`, the `_connect()` helper) — not a new testing pattern.
+- [x] A new authenticated endpoint updates the current Candidate's `searchable` flag, deriving identity from the session exactly as `/verify` does — never from a client-supplied `candidate_id`.
+- [x] Calling it without a valid session returns 401.
+- [x] Calling it persists the new value; a subsequent read of the Candidate reflects the change.
+- [x] `/verify`'s existing `searchable` field is unaffected and continues to work as it does today.
+- [x] Tested through the existing FastAPI `TestClient` seam (`tests/conftest.py`, the `_connect()` helper) — not a new testing pattern.
