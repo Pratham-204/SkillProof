@@ -3,11 +3,20 @@ spec's testing decisions: one seam at the FastAPI boundary, GitHub and Groq
 faked with fixture/canned data, embeddings and scoring run for real.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 
 from skillproof import taxonomy, verify_service
+from skillproof.ingestion import EvidenceBundle, EvidenceItem
 from skillproof.models import Candidate, EvidenceCard, Sighting
-from tests.fixtures.github_fixtures import OWNED_REPO, wire_verified_candidate
+from tests.fixtures.github_fixtures import (
+    OWNED_REPO,
+    QUALIFYING_COMMIT_MESSAGE,
+    QUALIFYING_DIFF_TEXT,
+    QUALIFYING_REVIEW_COMMENT,
+    wire_verified_candidate,
+)
 
 
 def _connect(client, *, login="octodev", github_user_id=42, code="test-code") -> dict:
@@ -243,6 +252,82 @@ def test_verify_with_undecryptable_token_prompts_reconnect(client, fake_github, 
     assert body["needs_reconnect"] is True
     assert body["cards"][0]["status"] == "failed"
     assert "reconnect" in body["cards"][0]["error"].lower()
+
+
+def test_a_skill_with_no_matching_evidence_is_unaffected_by_a_siblings_embeddings_failure(
+    client, fake_github, fake_embeddings
+):
+    """Ticket 01: each skill's matching Evidence Items are batched into their own
+    embeddings call, so one skill's call failing must only fail that skill's
+    card — Rust has no matching evidence in this fixture (score_skill never even
+    calls embed_batch for it), so it's an unaffected sibling regardless. See the
+    test below for the stronger case: two skills whose embed_batch calls both
+    actually execute."""
+    fake_embeddings.fail_for_texts = {QUALIFYING_COMMIT_MESSAGE, QUALIFYING_REVIEW_COMMENT}
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    client.post("/verify", json={"skills": ["FastAPI", "Rust"]})
+
+    cards = {c["skill"]: c for c in client.get(f"/evidence-card/{candidate_id}").json()["cards"]}
+    assert cards["FastAPI"]["status"] == "failed"
+    assert cards["FastAPI"]["error"]
+    assert cards["Rust"]["status"] == "complete"
+
+
+def test_a_skill_with_matching_evidence_is_isolated_from_a_siblings_embeddings_failure(
+    client, fake_github, fake_embeddings, db_session_factory, monkeypatch
+):
+    """The shared fixture (wire_verified_candidate) only ever produces genuine
+    matching evidence for FastAPI, so the sibling test above can't prove true
+    isolation between two skills whose embed_batch calls both actually run —
+    only that the per-skill loop keeps going when the other skill has nothing
+    to embed at all. This hand-builds evidence for two skills whose embed_batch
+    calls both execute — one configured to fail, the other succeeding on
+    genuinely different text — to prove real isolation."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    fastapi_text = "some fastapi-flavored commit message"
+    django_text = "some django-flavored commit message"
+    fake_embeddings.fail_for_texts = {fastapi_text}
+
+    now = datetime.now(timezone.utc)
+    bundle = EvidenceBundle(
+        items=[
+            EvidenceItem(
+                kind="commit",
+                repo=OWNED_REPO.full_name,
+                ref="c1",
+                url="https://example.com/c1",
+                text=fastapi_text,
+                date=now,
+                diff_text=QUALIFYING_DIFF_TEXT,
+            ),
+            EvidenceItem(
+                kind="commit",
+                repo=OWNED_REPO.full_name,
+                ref="c2",
+                url="https://example.com/c2",
+                text=django_text,
+                date=now,
+                files=("manage.py",),  # matches Django's config_files Detection Pattern
+            ),
+        ],
+        manifests={},
+    )
+    monkeypatch.setattr(verify_service, "ingest_evidence", lambda *args, **kwargs: bundle)
+
+    db = db_session_factory()
+    candidate = db.get(Candidate, candidate_id)
+    verify_service.start_verification(db, candidate, ["FastAPI", "Django"])
+    db.close()
+    verify_service.run_verification(db_session_factory, candidate_id, ["FastAPI", "Django"], fake_github)
+
+    cards = {c["skill"]: c for c in client.get(f"/evidence-card/{candidate_id}").json()["cards"]}
+    assert cards["FastAPI"]["status"] == "failed"
+    assert cards["Django"]["status"] == "complete"
+    assert cards["Django"]["evidence_type"] == "verified"
 
 
 def test_evidence_cards_sort_by_confidence_score_descending(client, fake_github):

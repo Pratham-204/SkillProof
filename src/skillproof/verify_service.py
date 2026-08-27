@@ -99,7 +99,20 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
         db.commit()
 
         for skill in skills:
-            result = scoring.score_skill(evidence_bundle, skill)
+            # Isolated per skill (ticket 01): a batched embeddings call failing
+            # for one skill — e.g. a future network-bound backend erroring or
+            # rate-limiting — must not abort the rest of this run. Without this,
+            # the exception would propagate out of the loop entirely, leaving
+            # every remaining skill's card stuck at "processing" forever (the
+            # "done" event still fires from the outer finally, but nothing ever
+            # flips those cards' status again).
+            try:
+                result = scoring.score_skill(evidence_bundle, skill)
+            except Exception as exc:
+                logger.exception("Scoring failed for skill %s, candidate %s", skill, candidate_id)
+                _fail_card(db, candidate_id, skill, current_version, f"Could not score this skill: {exc}")
+                db.commit()
+                continue
             card = (
                 db.query(EvidenceCard)
                 .filter_by(candidate_id=candidate_id, skill=skill, taxonomy_version=current_version)

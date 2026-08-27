@@ -70,13 +70,23 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
     # Qualification (the 0.35 floor) always uses the raw similarity — an item
     # either is or isn't real evidence, independent of how much it counts
     # toward Depth's average. The discount only affects that second part.
+    #
+    # One batched embed_batch() call for all of this skill's matching items,
+    # not one embed() call per item (ticket 01) — a prerequisite for any future
+    # embeddings backend with real per-call (e.g. network) overhead. A failure
+    # here propagates out of score_skill uncaught; the caller is responsible
+    # for isolating it to this one skill's Evidence Card.
     qualifying: list[tuple[EvidenceItem, float]] = []
-    for item in matching_items:
-        raw_similarity = embeddings.cosine_similarity(embeddings.embed(item.text), target_vector)
-        if raw_similarity < settings.evidence_qualifying_floor:
-            continue
-        depth_similarity = raw_similarity * DEPTH_COMMIT_MESSAGE_DISCOUNT if item.is_self_authored else raw_similarity
-        qualifying.append((item, depth_similarity))
+    if matching_items:
+        item_vectors = embeddings.embed_batch([item.text for item in matching_items])
+        for item, item_vector in zip(matching_items, item_vectors, strict=True):
+            raw_similarity = embeddings.cosine_similarity(item_vector, target_vector)
+            if raw_similarity < settings.evidence_qualifying_floor:
+                continue
+            depth_similarity = (
+                raw_similarity * DEPTH_COMMIT_MESSAGE_DISCOUNT if item.is_self_authored else raw_similarity
+            )
+            qualifying.append((item, depth_similarity))
 
     depth = 0.0
     span = 0.0

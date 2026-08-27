@@ -236,6 +236,79 @@ def test_fake_backend_precisely_includes_similarity_just_above_the_qualifying_fl
     assert result.source_commits[0].similarity == round(0.36 * scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT, 4)
 
 
+def test_score_skill_issues_one_batched_embeddings_call_per_skill(fake_embeddings, monkeypatch):
+    """Ticket 01: score_skill used to call embed() once per matching Evidence
+    Item; it must now collect all of a skill's matching items and issue a
+    single embed_batch() call — a prerequisite for a future embeddings backend
+    with real per-call (e.g. network) overhead."""
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    taxonomy.skill_embedding("FastAPI")  # warm the disk-cache-backed lru_cache before counting calls
+
+    calls: list[list[str]] = []
+    original_embed_batch = fake_embeddings.embed_batch
+
+    def counting_embed_batch(texts: list[str]) -> np.ndarray:
+        calls.append(list(texts))
+        return original_embed_batch(texts)
+
+    monkeypatch.setattr(fake_embeddings, "embed_batch", counting_embed_batch)
+
+    items = [
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref=f"c{i}",
+            url=f"https://example.com/c{i}",
+            text=f"item text {i}",
+            date=_NOW - timedelta(days=i),
+            diff_text=QUALIFYING_DIFF_TEXT,
+        )
+        for i in range(3)
+    ]
+    bundle = EvidenceBundle(items=items, manifests={})
+
+    scoring.score_skill(bundle, "FastAPI")
+
+    assert len(calls) == 1
+    assert calls[0] == ["item text 0", "item text 1", "item text 2"]
+
+
+def test_score_skill_matches_each_batched_vector_back_to_its_own_item(fake_embeddings):
+    """The real risk a batching refactor introduces is index misalignment —
+    item i getting item j's vector back. Two items in the SAME embed_batch
+    call with deliberately different similarities (one clearly qualifying,
+    one clearly not) proves the zip lines them up correctly, not just that
+    scores stay unchanged when every item behaves identically."""
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text["clearly qualifying text"] = np.array([1.0, 0.0])  # similarity 1.0
+    fake_embeddings.vectors_by_text["clearly non-qualifying text"] = _unit_vector_at_cosine(0.1)  # below the floor
+    items = [
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref="c1",
+            url="https://example.com/c1",
+            text="clearly non-qualifying text",
+            date=_NOW,
+            diff_text=QUALIFYING_DIFF_TEXT,
+        ),
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref="c2",
+            url="https://example.com/c2",
+            text="clearly qualifying text",
+            date=_NOW,
+            diff_text=QUALIFYING_DIFF_TEXT,
+        ),
+    ]
+    bundle = EvidenceBundle(items=items, manifests={})
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    assert {ref.ref for ref in result.source_commits} == {"c2"}
+
+
 def test_fake_backend_pins_the_exact_discount_on_commit_message_depth(fake_embeddings):
     text = "uses fastapi for the api layer"
     fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])

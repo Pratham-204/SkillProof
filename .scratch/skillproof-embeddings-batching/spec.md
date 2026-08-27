@@ -1,6 +1,6 @@
 # Batch and Isolate Embeddings Calls; Generalize the Taxonomy Cache
 
-Status: ready-for-agent
+Status: done
 
 ## Problem Statement
 

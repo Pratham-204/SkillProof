@@ -63,8 +63,16 @@ class FakeEmbeddingsBackend(EmbeddingsBackend):
 
     vectors_by_text: dict[str, np.ndarray] = field(default_factory=dict)
     default_dim: int = 8
+    # Test seam for scoring's per-skill batched embeddings call: embed_batch
+    # raises if any text in a given call is listed here, letting a test
+    # simulate one skill's embeddings call failing without touching any
+    # other skill's (each skill's matching Evidence Items are batched into
+    # their own single embed_batch call).
+    fail_for_texts: set[str] = field(default_factory=set)
 
     def embed_batch(self, texts: list[str]) -> np.ndarray:
+        if self.fail_for_texts.intersection(texts):
+            raise RuntimeError("Simulated embeddings backend failure")
         dim = len(next(iter(self.vectors_by_text.values()))) if self.vectors_by_text else self.default_dim
         return np.asarray([self.vectors_by_text.get(text, np.zeros(dim)) for text in texts])
 
