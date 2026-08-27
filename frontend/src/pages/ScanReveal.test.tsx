@@ -117,6 +117,30 @@ describe('ScanReveal', () => {
     expect(screen.getByText('Python')).toBeInTheDocument()
   })
 
+  it('sorts the "done" backfill alphabetically, regardless of the backend response order', async () => {
+    // The backfill (used for any card that never fired its own "reveal" event
+    // — every failed card, since verify_service._fail_card never publishes
+    // one) must not depend on this endpoint's row order: that order is
+    // score-descending, meant for the Dashboard/public card, not this live
+    // view. Returns "Zebra" before "Apple" to prove the component re-sorts
+    // locally rather than trusting the response order.
+    const cardsDb = [makeCard('Zebra', 'failed'), makeCard('Apple', 'failed')]
+    vi.mocked(api.getEvidenceCard).mockImplementation(async () => ({ ...CANDIDATE, cards: cardsDb }))
+
+    renderScanReveal()
+
+    await screen.findByText(/scanning your repos/i)
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
+    const source = FakeEventSource.instances[0]
+
+    source.emit('done')
+
+    await screen.findByText('Your Evidence Cards', undefined, { timeout: 3000 })
+    await screen.findByText('Zebra')
+    const text = document.body.textContent ?? ''
+    expect(text.indexOf('Apple')).toBeLessThan(text.indexOf('Zebra'))
+  })
+
   it('does not complete before the "done" backfill lands, even if the expected count matched early', async () => {
     // Reproduces the undercount race: skill A finishes (and its "reveal"
     // event is missed — progress_bus doesn't replay events published before

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from skillproof.db import get_db
@@ -32,7 +32,15 @@ def get_evidence_card(candidate_id: str, db: Session = Depends(get_db)) -> Candi
             & (EvidenceCard.taxonomy_version == latest_per_skill.c.taxonomy_version),
         )
         .filter(EvidenceCard.candidate_id == candidate_id)
-        .order_by(EvidenceCard.skill)
+        # Strongest evidence first. A "failed" card carries no meaningful score —
+        # _fail_card only flips status/error, never clearing a prior run's stale
+        # confidence_score — so it's ranked last regardless of that stored value,
+        # ahead of the score-descending order applied to every other card.
+        .order_by(
+            case((EvidenceCard.status == "failed", 1), else_=0),
+            EvidenceCard.confidence_score.desc(),
+            EvidenceCard.skill.asc(),
+        )
         .all()
     )
 

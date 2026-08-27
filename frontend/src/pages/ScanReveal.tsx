@@ -106,7 +106,15 @@ export default function ScanReveal() {
         .then((evidence) => {
           setCards((prev) => {
             const known = new Set(prev.map((c) => c.skill))
-            const missing = evidence.cards.filter((c) => !known.has(c.skill))
+            // Sorted alphabetically here rather than trusting this fetch's own
+            // order (which ranks by score, for the Dashboard/public card) — a
+            // skill that fails before ever revealing (e.g. _fail_card, which
+            // never publishes a "reveal" event) only ever arrives through this
+            // backfill, so its position shouldn't depend on an ordering meant
+            // for a different view.
+            const missing = evidence.cards
+              .filter((c) => !known.has(c.skill))
+              .sort((a, b) => a.skill.localeCompare(b.skill))
             return missing.length ? [...prev, ...missing] : prev
           })
         })

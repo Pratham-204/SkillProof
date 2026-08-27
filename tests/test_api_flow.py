@@ -245,6 +245,57 @@ def test_verify_with_undecryptable_token_prompts_reconnect(client, fake_github, 
     assert "reconnect" in body["cards"][0]["error"].lower()
 
 
+def test_evidence_cards_sort_by_confidence_score_descending(client, fake_github):
+    """The skill "C" sorts alphabetically before "FastAPI" but scores 0 (no
+    matching evidence in the fixture) while FastAPI scores >0 — a case where
+    alphabetical and score-descending order disagree, so this actually
+    distinguishes the two."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    client.post("/verify", json={"skills": ["C", "FastAPI"]})
+
+    cards = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
+    assert [c["skill"] for c in cards] == ["FastAPI", "C"]
+    assert cards[0]["confidence_score"] > cards[1]["confidence_score"]
+
+
+def test_evidence_cards_with_equal_score_tie_break_alphabetically(client, fake_github):
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    client.post("/verify", json={"skills": ["Rust", "Go"]})
+
+    cards = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
+    assert cards[0]["confidence_score"] == cards[1]["confidence_score"] == 0
+    assert [c["skill"] for c in cards] == ["Go", "Rust"]
+
+
+def test_failed_card_sorts_after_scored_cards_even_with_a_stale_higher_score(
+    client, fake_github, db_session_factory
+):
+    """_fail_card only flips status/error — it never clears a previous run's
+    confidence_score — so a card that scored well once, then failed on a later
+    re-verify, keeps that stale score. It must still sort last."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+    client.post("/verify", json={"skills": ["FastAPI", "Rust"]})
+
+    db = db_session_factory()
+    try:
+        rust_card = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill="Rust").one()
+        rust_card.status = "failed"
+        rust_card.error = "Verification failed: simulated for test"
+        rust_card.confidence_score = 0.99  # stale, higher than FastAPI's real score
+        db.commit()
+    finally:
+        db.close()
+
+    cards = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
+    assert [c["skill"] for c in cards] == ["FastAPI", "Rust"]
+    assert cards[1]["status"] == "failed"
+
+
 def test_explain_generates_then_caches(client, fake_github, fake_groq):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate_id = _connect(client)["candidate_id"]
