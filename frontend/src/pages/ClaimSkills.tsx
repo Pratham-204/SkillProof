@@ -26,6 +26,13 @@ export default function ClaimSkills() {
     }
   }, [])
 
+  // Seed the checkbox from the candidate's current setting once it loads, so
+  // claiming more skills doesn't silently opt an already-searchable candidate
+  // back out just because this form's local state starts at `false`.
+  useEffect(() => {
+    if (candidate) setSearchable(candidate.searchable)
+  }, [candidate])
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (selected.length === 0 || submitting) return
