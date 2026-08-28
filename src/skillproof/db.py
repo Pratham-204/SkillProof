@@ -10,8 +10,24 @@ class Base(DeclarativeBase):
     pass
 
 
+def _normalize_database_url(url: str) -> str:
+    """Railway (and most Postgres hosts) inject DATABASE_URL as a driver-less
+    postgres:// or postgresql:// URL, but SQLAlchemy needs an explicit driver
+    named in the scheme — "postgres://" isn't even a recognized alias anymore,
+    and driver-less "postgresql://" only resolves if psycopg2 happens to be
+    installed, which it isn't (this app installs psycopg, v3, instead). A URL
+    that already names a driver (e.g. "postgresql+psycopg://") passes through
+    unchanged, as does every SQLite URL.
+    """
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url.removeprefix("postgres://")
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url.removeprefix("postgresql://")
+    return url
+
+
 def make_engine(database_url: str | None = None):
-    url = database_url or get_settings().database_url
+    url = _normalize_database_url(database_url or get_settings().database_url)
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
     return create_engine(url, connect_args=connect_args)
 
