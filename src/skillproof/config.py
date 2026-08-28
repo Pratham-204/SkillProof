@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     search_result_limit: int = 50
 
     session_cookie_name: str = "skillproof_session"
+    # `CandidateSession` rows never expire server-side (deps.py's
+    # get_current_candidate has no TTL check), but the cookie previously had no
+    # max_age/expires at all — making it a browser-lifetime-only cookie, so a
+    # Candidate got silently logged out on perfectly ordinary browser behavior
+    # (browser fully closed and reopened, "clear cookies on exit", etc.), not
+    # just an actual sign-out. 30 days, non-refreshing: this is a read-only
+    # GitHub-scope session with no competing "log me out" UX (sign-out is
+    # explicitly out of scope per CONTEXT.md round 10), so there's no reason to
+    # make a Candidate reconnect more often than ADR-0003's whole point of
+    # persisting the GitHub token in the first place.
+    session_max_age_days: int = 30
     # False so local dev over plain http:// works — a Secure cookie is
     # silently dropped by browsers over http://, which would break login, not
     # just weaken it. Defaults to True instead whenever environment=production

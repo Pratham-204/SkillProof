@@ -41,6 +41,20 @@ def test_connect_creates_then_reuses_candidate_identity(client, fake_github):
     assert first["github_login"] == "octodev"
 
 
+def test_session_cookie_persists_beyond_the_browser_session(client, fake_github):
+    """Regression: the session cookie previously had no max_age/expires, making
+    it a browser-lifetime-only cookie even though the server-side
+    CandidateSession row it points to never expires — so a Candidate got
+    logged out on ordinary browser behavior (closing the browser), not just an
+    actual sign-out. See config.py's `session_max_age_days`."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+
+    response = client.get("/auth/github/callback?code=test-code", follow_redirects=False)
+
+    set_cookie = response.headers["set-cookie"]
+    assert "Max-Age=2592000" in set_cookie  # 30 days, in seconds
+
+
 def test_toggle_searchable_updates_and_persists(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     connected = _connect(client)

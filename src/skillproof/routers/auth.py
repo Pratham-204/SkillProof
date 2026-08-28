@@ -71,6 +71,7 @@ def callback(
         secure=settings.session_cookie_secure,
         samesite="lax",
         path="/",
+        max_age=settings.session_max_age_days * 24 * 60 * 60,
     )
     return response
 
