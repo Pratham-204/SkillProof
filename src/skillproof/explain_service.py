@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from skillproof.groq_client import GroqClient, GroqUnavailableError
 from skillproof.models import EvidenceCard
+
+logger = logging.getLogger(__name__)
 
 
 def build_prompt(card: EvidenceCard) -> str:
@@ -71,5 +75,11 @@ def generate_explanation(card: EvidenceCard, groq_client: GroqClient) -> tuple[s
     """Returns (explanation_text, is_fallback)."""
     try:
         return groq_client.generate_explanation(build_prompt(card)), False
-    except GroqUnavailableError:
+    except GroqUnavailableError as exc:
+        logger.warning(
+            "generate_explanation failed for candidate=%s skill=%s; using template fallback: %s",
+            card.candidate_id,
+            card.skill,
+            exc,
+        )
         return template_fallback(card), True

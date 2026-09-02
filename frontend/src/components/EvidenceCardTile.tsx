@@ -39,13 +39,17 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
 
   const isWeak = isWeakEvidence(card.evidence_type)
 
-  // Fetched once per mount, then held in this tile's own state — re-expanding
-  // the same (still-mounted) card never re-fetches on top of the backend's
-  // own server-side cache on the Evidence Card.
+  // A real explanation is fetched once per mount and held in this tile's own
+  // state — re-expanding never re-fetches on top of it. A fallback explanation
+  // (cached or freshly returned) is retried on every re-expand instead, mirroring
+  // the backend's own "retried transparently on the next call" cache policy
+  // (routers/explain.py) — otherwise a card that cached a fallback before the
+  // LLM came back up would show stale template text forever, since `explanation`
+  // is never null once the backend has cached anything at all.
   function handleToggle() {
     const opening = !expanded
     setExpanded(opening)
-    if (opening && explanation === null && !explaining) {
+    if (opening && (explanation === null || isFallback) && !explaining) {
       setExplaining(true)
       setExplainError(null)
       explainSkill(candidateId, card.skill)

@@ -70,9 +70,17 @@ class RealGroqClient(GroqClient):
             )
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
+            content = data["choices"][0]["message"]["content"].strip()
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
             raise GroqUnavailableError(str(exc)) from exc
+
+        if not content:
+            # A reasoning model can spend its whole completion budget on hidden
+            # `reasoning` tokens and return empty `content` with a 200 and no
+            # exception raised anywhere above — that is not a real explanation
+            # and must not be cached as one (this actually happened in production).
+            raise GroqUnavailableError("Groq returned an empty completion")
+        return content
 
     def generate_explanation(self, prompt: str) -> str:
         return self._post_chat(

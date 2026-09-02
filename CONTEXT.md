@@ -74,7 +74,7 @@ _Avoid_: Public/private (the card is always public; this flag only controls disc
 
 ## Resolved (round 4)
 
-- The explanation-layer LLM call uses Groq (Llama 3.3 70B, free tier, OpenAI-compatible API) — chosen for a thin, swappable client and more than enough capability for a one-sentence summary.
+- The explanation-layer LLM call uses Groq (free tier, OpenAI-compatible API) — chosen for a thin, swappable client and more than enough capability for a one-sentence summary. The specific model is an implementation detail in `Settings.groq_model` (`qwen/qwen3.8-27b`, having replaced the now-retired `llama-3.3-70b-versatile`), not part of this decision — Groq periodically deprecates models outright, so the glossary intentionally doesn't pin one.
 - `/explain` is called lazily, only when an Evidence Card is viewed and has no cached Explanation yet — not baked into the `/verify` background job. `/verify` completion means scoring is done; explanations are generated separately, on demand.
 - The Explanation prompt reuses the same qualifying Evidence Items already computed for the Confidence Score (not a separately-derived summary), keeping it traceable to `source_commits`.
 - LLM failure or free-tier rate-limiting falls back to a deterministic template sentence built from evidence stats already on the card (commit count, repo count, day span) — no LLM dependency for the fallback path.

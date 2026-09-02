@@ -43,7 +43,17 @@ class Settings(BaseSettings):
     token_encryption_key: str = ""
 
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    # Groq periodically retires models outright (this replaced llama-3.3-70b-versatile,
+    # which started 404ing with model_not_found — not a key/rate-limit issue, the model
+    # was just gone). Deliberately not one of Groq's "gpt-oss" reasoning models: those
+    # spend hidden `reasoning` completion tokens out of the same fixed max_tokens budget
+    # below before ever writing visible content, and on this app's actual explanation
+    # prompts (not just simple ones) that reliably burned the entire 120-token budget on
+    # reasoning and returned empty content with finish_reason="length" — a "successful"
+    # call by `_post_chat`'s old contract that silently cached a blank explanation.
+    # qwen3.8-27b isn't a reasoning model at all (no hidden token spend) and produced a
+    # clean sentence within budget on every real prompt this app generates.
+    groq_model: str = "qwen/qwen3.8-27b"
     groq_base_url: str = "https://api.groq.com/openai/v1"
 
     embedding_model_name: str = "all-MiniLM-L6-v2"
