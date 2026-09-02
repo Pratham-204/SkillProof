@@ -1,0 +1,11 @@
+# The test-then-deploy gate is enforced by the GitHub Actions workflow itself, not Railway's native "Wait for CI"
+
+Railway offers a native "Wait for CI" deployment gate that can hold a deploy until a connected GitHub Actions run passes. We didn't use it — it was reported unreliable at the time this was decided (deployments not triggering even after Actions passed) — and instead built the gate into `ci.yml` directly: `backend` and `frontend` run first, and a `deploy` job declares `needs: [backend, frontend]` plus an explicit `if: success() && ...` condition before it will invoke `railway up --service SkillProof` (`--service` is required once a project has more than one service, as this one does with its Postgres addon — Railway can't otherwise infer which service a project-scoped token should build and deploy). The `success()` call is not redundant: a job's implicit "only run if its dependencies succeeded" default is *replaced*, not ANDed, the moment that job declares its own custom `if:` — a mistake caught during ticket 03's own implementation, before it ever reached production.
+
+## Known gap
+
+This gate governs only the path from `ci.yml`'s `deploy` job. Railway's own GitHub integration still auto-deploys the service natively on every push to `main`, entirely independent of whether `ci.yml` passes — that native trigger was never disabled. In practice this means a commit that fails `backend` or `frontend` can still reach production immediately via Railway's own auto-deploy, before or regardless of the Actions-enforced gate's result. Closing this gap requires turning off Railway's auto-deploy for this service (Settings → Source → "Auto deploys when pushed to GitHub") so `ci.yml`'s `deploy` job becomes the only path that can trigger a production deploy — not yet done as of this ADR.
+
+## Consequences
+
+Until that native auto-deploy is disabled, this ADR describes the intended gate, not a fully enforced one. Once it is disabled, a broken `deploy` job (an invalid `RAILWAY_TOKEN`, an ambiguous `--service` reference, or any other Actions-side failure) would mean *no* path can deploy until fixed — there would no longer be an implicit fallback the way Railway's native trigger currently, if unintentionally, provides.
