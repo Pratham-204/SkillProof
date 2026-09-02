@@ -2,7 +2,7 @@ from functools import lru_cache
 from typing import Self
 
 from cryptography.fernet import Fernet
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,7 +15,18 @@ class Settings(BaseSettings):
     # this directly except the validators below.
     environment: str = "development"
 
-    database_url: str = "sqlite:///./skillproof.db"
+    # An explicit validation_alias bypasses env_prefix for this field only
+    # (every other field keeps requiring its SKILLPROOF_ prefix): Railway's
+    # Postgres addon, like "most Postgres hosts" (db.py's own docstring),
+    # injects a bare DATABASE_URL, not a SKILLPROOF_-prefixed one, so this
+    # field must accept that directly or it silently never binds — the app
+    # would keep using the SQLite default against a real Postgres addon
+    # sitting right there unused (skillproof-deployment ticket 05).
+    # SKILLPROOF_DATABASE_URL still wins if both happen to be set.
+    database_url: str = Field(
+        default="sqlite:///./skillproof.db",
+        validation_alias=AliasChoices("SKILLPROOF_DATABASE_URL", "DATABASE_URL"),
+    )
 
     github_client_id: str = "dev-client-id"
     github_client_secret: str = "dev-client-secret"
