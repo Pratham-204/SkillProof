@@ -76,7 +76,14 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
     # embeddings backend with real per-call (e.g. network) overhead. A failure
     # here propagates out of score_skill uncaught; the caller is responsible
     # for isolating it to this one skill's Evidence Card.
-    qualifying: list[tuple[EvidenceItem, float]] = []
+    # Each qualifying item carries both its raw similarity (what cleared the
+    # floor above, and what source_commits shows) and its depth_similarity
+    # (raw, discounted for a self-authored item) used only for ranking/
+    # averaging below — conflating the two in source_commits let a
+    # legitimately-qualifying commit-message match display as if its
+    # similarity were below the documented 0.35 floor (skillproof-
+    # explanation-legibility issue 01).
+    qualifying: list[tuple[EvidenceItem, float, float]] = []
     if matching_items:
         item_vectors = embeddings.embed_batch([item.text for item in matching_items])
         for item, item_vector in zip(matching_items, item_vectors, strict=True):
@@ -86,18 +93,18 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
             depth_similarity = (
                 raw_similarity * DEPTH_COMMIT_MESSAGE_DISCOUNT if item.is_self_authored else raw_similarity
             )
-            qualifying.append((item, depth_similarity))
+            qualifying.append((item, raw_similarity, depth_similarity))
 
     depth = 0.0
     span = 0.0
     span_days = 0
-    top_n: list[tuple[EvidenceItem, float]] = []
+    top_n: list[tuple[EvidenceItem, float, float]] = []
     if qualifying:
-        qualifying.sort(key=lambda pair: pair[1], reverse=True)
+        qualifying.sort(key=lambda triple: triple[2], reverse=True)
         top_n = qualifying[:DEPTH_TOP_N]
-        depth = sum(sim for _, sim in top_n) / len(top_n)
+        depth = sum(depth_sim for _, _, depth_sim in top_n) / len(top_n)
 
-        dates = [item.date for item, _ in qualifying]
+        dates = [item.date for item, _, _ in qualifying]
         span_days = (max(dates) - min(dates)).days
         span = span_days / (span_days + SPAN_SATURATION_DAYS)
 
@@ -107,8 +114,8 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
     # source_commits mirrors top_n, not the full qualifying set: it's meant to
     # show exactly what drove the score, not the wider set that only feeds Span.
     source_commits = [
-        QualifyingEvidence(kind=item.kind, repo=item.repo, ref=item.ref, url=item.url, similarity=round(sim, 4))
-        for item, sim in top_n
+        QualifyingEvidence(kind=item.kind, repo=item.repo, ref=item.ref, url=item.url, similarity=round(raw_sim, 4))
+        for item, raw_sim, _ in top_n
     ]
 
     return ConfidenceResult(

@@ -67,11 +67,16 @@ def test_depth_uses_top_three_while_span_uses_the_full_qualifying_set():
     assert result.temporal_span_days == 150
 
 
-def test_depth_discounts_commit_message_similarity_relative_to_pr_comment():
-    """Ticket 03: identical topical content, produced identical raw similarity —
-    the only difference is that one arrives as a commit message and the other
-    as a PR comment, so only the discount can explain their different Depth
-    contribution, with the commit message counting for less."""
+def test_source_commits_similarity_is_undiscounted_even_for_a_commit_message_match():
+    """The Depth discount (ticket 03/ADR-0004) weights a commit-message match's
+    contribution to the Depth *score* down relative to a PR comment's — but
+    source_commits.similarity must always show the raw similarity that actually
+    cleared the 0.35 qualifying floor, not that discounted ranking value, or a
+    legitimately-qualifying commit-message match can display as if it were
+    below the documented floor (skillproof-explanation-legibility issue 01).
+    Identical text produces identical raw similarity for both kinds here; the
+    discount's effect on the actual score is pinned exactly in
+    test_fake_backend_pins_the_exact_discount_on_commit_message_depth below."""
     identical_text = QUALIFYING_REVIEW_COMMENT
     items = [
         EvidenceItem(
@@ -97,8 +102,7 @@ def test_depth_discounts_commit_message_similarity_relative_to_pr_comment():
     result = scoring.score_skill(bundle, "FastAPI")
 
     by_kind = {ref.kind: ref.similarity for ref in result.source_commits}
-    assert by_kind["commit"] < by_kind["pr_comment"]
-    assert abs(by_kind["commit"] - round(by_kind["pr_comment"] * scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT, 4)) < 1e-4
+    assert by_kind["commit"] == by_kind["pr_comment"]
 
 
 def test_volume_and_presence_from_matching_commits_with_no_depth_or_span_below_floor():
@@ -233,7 +237,7 @@ def test_fake_backend_precisely_includes_similarity_just_above_the_qualifying_fl
     result = scoring.score_skill(bundle, "FastAPI")
 
     assert len(result.source_commits) == 1
-    assert result.source_commits[0].similarity == round(0.36 * scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT, 4)
+    assert result.source_commits[0].similarity == 0.36  # raw similarity, undiscounted
 
 
 def test_score_skill_issues_one_batched_embeddings_call_per_skill(fake_embeddings, monkeypatch):
@@ -336,6 +340,15 @@ def test_fake_backend_pins_the_exact_discount_on_commit_message_depth(fake_embed
 
     result = scoring.score_skill(bundle, "FastAPI")
 
+    # source_commits shows each item's raw (undiscounted) qualifying similarity...
     by_kind = {ref.kind: ref.similarity for ref in result.source_commits}
     assert by_kind["pr_comment"] == 1.0
-    assert by_kind["commit"] == scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT == 0.6
+    assert by_kind["commit"] == 1.0
+
+    # ...but the discount still lowers the commit message's actual contribution
+    # to Depth: depth = mean(1.0 * DEPTH_COMMIT_MESSAGE_DISCOUNT, 1.0) = 0.8, so
+    # confidence = 0.20*presence(1) + 0.40*volume(1/6) + 0.25*depth(0.8) + 0.15*span(0)
+    expected_depth = (1.0 * scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT + 1.0) / 2
+    assert expected_depth == 0.8
+    expected_confidence = round(0.20 * 1 + 0.40 * (1 / 6) + 0.25 * expected_depth + 0.15 * 0, 4)
+    assert result.confidence_score == expected_confidence
