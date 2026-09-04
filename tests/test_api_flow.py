@@ -9,7 +9,7 @@ import pytest
 
 from skillproof import taxonomy, verify_service
 from skillproof.ingestion import EvidenceBundle, EvidenceItem
-from skillproof.models import Candidate, EvidenceCard, Sighting
+from skillproof.models import Candidate, CandidateSession, EvidenceCard, Sighting
 from tests.fixtures.github_fixtures import (
     OWNED_REPO,
     QUALIFYING_COMMIT_MESSAGE,
@@ -53,6 +53,75 @@ def test_session_cookie_persists_beyond_the_browser_session(client, fake_github)
 
     set_cookie = response.headers["set-cookie"]
     assert "Max-Age=2592000" in set_cookie  # 30 days, in seconds
+
+
+def test_reconnect_deletes_previous_session_row_and_clears_needs_reconnect(client, fake_github, db_session_factory):
+    """Regression: every reconnect previously left its old CandidateSession row
+    orphaned in the database forever (no session GC exists otherwise) —
+    /auth/github/callback now deletes whatever session row the incoming
+    request's cookie pointed to before issuing the new one
+    (skillproof-connect-github-account ticket 01). Also covers the ticket's
+    other reconnect assertion: needs_reconnect clears on a fresh callback,
+    same as it always has."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+
+    candidate_id = _connect(client)["candidate_id"]
+    db = db_session_factory()
+    try:
+        assert db.query(CandidateSession).count() == 1
+        candidate = db.get(Candidate, candidate_id)
+        candidate.needs_reconnect = True
+        db.commit()
+    finally:
+        db.close()
+
+    reconnected = _connect(client)  # reconnects as the same GitHub identity; cookie from above is still set
+
+    assert reconnected["needs_reconnect"] is False
+    db = db_session_factory()
+    try:
+        assert db.query(CandidateSession).count() == 1
+    finally:
+        db.close()
+
+
+def test_switching_github_account_replaces_session_without_merging_candidates(
+    client, fake_github, db_session_factory
+):
+    """Authorizing as a different GitHub identity while a session cookie is
+    already present resolves to a distinct Candidate (no merge), replaces the
+    active session, and cleans up the old session row rather than leaving it
+    orphaned."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="code-a")
+    wire_verified_candidate(fake_github, login="anotherdev", github_user_id=99, code="code-b")
+
+    first = _connect(client, login="octodev", github_user_id=42, code="code-a")
+    second = _connect(client, login="anotherdev", github_user_id=99, code="code-b")
+
+    assert second["candidate_id"] != first["candidate_id"]
+    assert second["github_login"] == "anotherdev"
+
+    db = db_session_factory()
+    try:
+        assert db.query(CandidateSession).count() == 1
+        remaining_session = db.query(CandidateSession).one()
+        assert remaining_session.candidate_id == second["candidate_id"]
+
+        original_candidate = db.get(Candidate, first["candidate_id"])
+        assert original_candidate is not None
+        assert original_candidate.github_login == "octodev"
+    finally:
+        db.close()
+
+
+def test_first_login_with_no_existing_session_cookie_succeeds(client, fake_github):
+    """No session cookie exists on a brand-new browser's first login — the
+    cleanup step must be a no-op here, not an error."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+
+    response = client.get("/auth/github/callback?code=test-code", follow_redirects=False)
+
+    assert response.status_code in (302, 307)
 
 
 def test_toggle_searchable_updates_and_persists(client, fake_github):

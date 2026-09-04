@@ -34,16 +34,23 @@ def get_session_factory():
     return SessionLocal
 
 
+def get_session_by_cookie(request: Request, db: Session) -> CandidateSession | None:
+    """Resolves the session cookie set at OAuth callback (ADR-0006) to a
+    CandidateSession row, or None if the cookie is absent or stale. Shared by
+    get_current_candidate below and the OAuth callback's own stale-session
+    cleanup (skillproof-connect-github-account ticket 01)."""
+    session_id = request.cookies.get(get_settings().session_cookie_name)
+    if session_id is None:
+        return None
+    return db.get(CandidateSession, session_id)
+
+
 def get_current_candidate(request: Request, db: Session = Depends(get_db)) -> Candidate:
     """Resolves the session cookie set at OAuth callback (ADR-0006) to a Candidate.
     Raises 401 on a missing, unknown, or stale session rather than falling back to
     any client-supplied identity — that trust is exactly what ADR-0006 removes.
     """
-    session_id = request.cookies.get(get_settings().session_cookie_name)
-    if session_id is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    session = db.get(CandidateSession, session_id)
+    session = get_session_by_cookie(request, db)
     if session is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
 

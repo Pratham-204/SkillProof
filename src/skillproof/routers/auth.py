@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from skillproof import security
 from skillproof.config import get_settings
 from skillproof.db import get_db
-from skillproof.deps import get_current_candidate, get_github_client
+from skillproof.deps import get_current_candidate, get_github_client, get_session_by_cookie
 from skillproof.github_client import GitHubClient
 from skillproof.models import Candidate, CandidateSession
 from skillproof.schemas import CandidateOut, SearchableUpdate
@@ -28,11 +28,16 @@ def login() -> RedirectResponse:
 @router.get("/callback")
 def callback(
     code: str,
+    request: Request,
     db: Session = Depends(get_db),
     github_client: GitHubClient = Depends(get_github_client),
 ) -> RedirectResponse:
     """First login creates a Candidate keyed by GitHub user ID; a later login
-    from the same account reuses the existing candidate_id (issue 01).
+    from the same account reuses the existing candidate_id (issue 01). A
+    session cookie already present on the request — a reconnect, or a login as
+    a *different* GitHub identity (skillproof-connect-github-account) — has its
+    old CandidateSession row deleted here rather than left orphaned forever,
+    since no session ever otherwise expires server-side.
 
     Issues an HttpOnly session cookie and redirects into the app, rather than
     returning the Candidate as JSON (a browser mid-OAuth-redirect has nowhere
@@ -40,6 +45,7 @@ def callback(
     on future writes — the latter is exactly the trust ADR-0006 removes, since
     candidate_id is intentionally public.
     """
+    settings = get_settings()
     token = github_client.exchange_code_for_token(code)
     user = github_client.get_authenticated_user(token)
 
@@ -58,11 +64,14 @@ def callback(
 
     db.flush()  # populates candidate.candidate_id for a brand-new Candidate before the session row references it
 
+    previous_session = get_session_by_cookie(request, db)
+    if previous_session is not None:
+        db.delete(previous_session)
+
     session = CandidateSession(session_id=security.generate_session_token(), candidate_id=candidate.candidate_id)
     db.add(session)
     db.commit()
 
-    settings = get_settings()
     response = RedirectResponse(settings.github_oauth_success_redirect)
     response.set_cookie(
         key=settings.session_cookie_name,
