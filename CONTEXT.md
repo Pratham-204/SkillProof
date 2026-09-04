@@ -60,6 +60,14 @@ _Avoid_: User (when a more specific term is meant)
 A per-Candidate boolean, defaulting to `false`, that a Candidate opts into (via a checkbox shown when generating their Evidence Card) to appear in `/search` results. Only gates inclusion in search — the Evidence Card itself is always reachable directly by URL regardless of this flag.
 _Avoid_: Public/private (the card is always public; this flag only controls discoverability)
 
+**Provenance Check**:
+An eligibility gate applied to a Candidate's owned, non-forked repos already present in the current Evidence Bundle: for each such repo, one GitHub commit-search call checks whether its earliest commit's SHA already exists in another public repo the Candidate doesn't own. A match hard-disqualifies that repo's commits from Volume, Depth, and Span — never Presence, since a manifest declaration carries no authorship claim to dispute. Runs silently: it changes the resulting Confidence Score but is never surfaced as a visible label on the Evidence Card. See ADR-0012.
+_Avoid_: Anti-gaming (that term already covers ADR-0004's separate PR-membership and Depth-discount corrections; this is a distinct, later mechanism)
+
+**Span Ceiling**:
+A multiplicative cap on the final Confidence Score, applied on top of — not instead of — Span's existing weighted contribution. Uses its own smooth saturation curve and a saturation constant larger than Span's own, so a short burst of otherwise-strong evidence can't reach a high Confidence Score the way sustained evidence over time can. Not a fifth Signal; it sits outside the four-Signal weighted sum. See ADR-0013.
+_Avoid_: Signal (a Signal is one of the four weighted components that sum to the base Confidence Score; the Ceiling is a separate final adjustment)
+
 ## Resolved (round 2)
 
 - Candidate identity is persistent: first GitHub login creates a `Candidate` record (GitHub user ID ↔ `candidate_id`); later logins reuse it. Re-verification overwrites the existing Evidence Card per Skill Tag — no history/versioning in MVP.
@@ -124,6 +132,14 @@ See ADR-0008.
 - `searchable` becomes toggleable on its own via a new small authenticated endpoint, rather than only settable as a field on a `/verify` call as today.
 - A recruiter-facing portal (accounts, login, saved candidates) would be a deliberate reversal of the existing "no Recruiter account" decision (see Recruiter term and Notes below) — explicitly out of scope for this round and deferred to its own future grilling session; nothing here assumes it exists.
 - Frontend navigation gets persistent, viewer-agnostic nav chrome on every page, and `ScanReveal`'s claimed-skills tracking moves from trusting router `location.state` (silently lost on back-navigation or a refresh) to deriving the expected set from the Candidate's own `processing`-status cards instead — addressing the actual cause of state loss on back-navigation, not just adding a link. Sign-out/session termination is explicitly out of scope for this pass.
+
+## Resolved (round 11)
+
+- A new Provenance Check closes a gap ADR-0004's anti-gaming corrections didn't cover: an owned, non-forked repo's commits could still inflate Volume/Depth/Span even if that history was imported rather than genuinely authored by the Candidate. For each owned, non-forked repo already in the current Evidence Bundle, one GitHub commit-search call checks whether its earliest commit's SHA exists in another public repo the Candidate doesn't own; a match hard-disqualifies that repo's commits from Volume, Depth, and Span (not Presence). See ADR-0012.
+- The Provenance Check is deliberately silent: a match changes the Confidence Score but is never surfaced as a visible label on the public, unauthenticated Evidence Card. Publishing an automated fraud-adjacent accusation with no dispute mechanism is a separate, weightier product decision, out of scope here.
+- A positive Provenance Check match is cached permanently once found; a clean result is re-checked on each future re-verification rather than cached, since the absence of a match today isn't a permanent guarantee.
+- A new Span Ceiling caps the final Confidence Score based on sustained activity, addressing a gap the existing formula's purely additive Span weight left open: a short, intense burst of Volume/Depth evidence could previously reach a high score discounted by no more than Span's 15% share. The Ceiling is a separate multiplicative factor layered on top of the existing weighted sum — not a replacement for Span's weight, and not a fifth Signal — using its own saturation curve and a constant distinct from (and larger than) Span's own `SPAN_SATURATION_DAYS`. See ADR-0013.
+- Surveyed five open-source repos (gitfut, gh-fake-analyzer, GitHub-Profile-Analyzer, ossinsight, gitinspector) for reusable scoring logic. Two yielded the mechanisms above; GitHub-Profile-Analyzer, ossinsight, and gitinspector had no transferable scoring algorithm on inspection — only descriptive visualizations over the same raw GitHub counts SkillProof already has access to.
 
 ## Notes
 
