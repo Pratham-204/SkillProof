@@ -157,6 +157,88 @@ def test_list_qualifying_commits_treats_409_empty_repo_as_zero_commits():
     assert commits == []
 
 
+def test_get_earliest_commit_sha_returns_the_single_commit_when_only_one_page():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("per_page") == "1"
+        return httpx.Response(200, json=[{"sha": "only-commit"}])  # no Link header: one page total
+
+    client = _client(handler)
+
+    sha = client.get_earliest_commit_sha("token", Repo(owner="octodev", name="skillproof-lib"))
+
+    assert sha == "only-commit"
+
+
+def test_get_earliest_commit_sha_follows_last_link_to_the_true_root_commit():
+    """Commits page newest-first, so the earliest commit is on the LAST page,
+    not the first — a repo with history must follow the `rel="last"` link
+    rather than returning the newest commit's sha."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "42":
+            return httpx.Response(200, json=[{"sha": "true-root-commit"}])
+        return httpx.Response(
+            200,
+            json=[{"sha": "newest-commit"}],
+            headers={
+                "Link": (
+                    '<https://api.github.com/repos/octodev/skillproof-lib/commits?per_page=1&page=2>; rel="next", '
+                    '<https://api.github.com/repos/octodev/skillproof-lib/commits?per_page=1&page=42>; rel="last"'
+                )
+            },
+        )
+
+    client = _client(handler)
+
+    sha = client.get_earliest_commit_sha("token", Repo(owner="octodev", name="skillproof-lib"))
+
+    assert sha == "true-root-commit"
+
+
+def test_get_earliest_commit_sha_returns_none_for_empty_repo():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"message": "Git Repository is empty."})
+
+    client = _client(handler)
+
+    sha = client.get_earliest_commit_sha("token", Repo(owner="octodev", name="empty-repo"))
+
+    assert sha is None
+
+
+def test_commit_exists_elsewhere_true_when_match_is_outside_the_excluded_owner():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("q") == "hash:abc123"
+        return httpx.Response(
+            200, json={"items": [{"repository": {"owner": {"login": "someorg"}}}]}
+        )
+
+    client = _client(handler)
+
+    assert client.commit_exists_elsewhere("token", "abc123", exclude_owner="octodev") is True
+
+
+def test_commit_exists_elsewhere_false_when_only_match_is_the_excluded_owners_own_repo():
+    """A candidate's own repo trivially contains its own commit — that must
+    never count as evidence the commit exists 'elsewhere'."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": [{"repository": {"owner": {"login": "octodev"}}}]})
+
+    client = _client(handler)
+
+    assert client.commit_exists_elsewhere("token", "abc123", exclude_owner="octodev") is False
+
+
+def test_commit_exists_elsewhere_false_when_no_matches_at_all():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": []})
+
+    client = _client(handler)
+
+    assert client.commit_exists_elsewhere("token", "abc123", exclude_owner="octodev") is False
+
+
 def test_get_manifest_files_retries_on_secondary_rate_limit_then_succeeds(monkeypatch):
     monkeypatch.setattr(github_client.time, "sleep", lambda seconds: None)
     attempts = {"requirements.txt": 0}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from skillproof import heuristics, taxonomy
@@ -57,10 +57,18 @@ def _text_matches(text: str, pattern: DetectionPattern) -> bool:
 class EvidenceBundle:
     """Everything scoring needs for one Candidate, gathered once per `/verify` call
     (not once per claimed skill): the filtered evidence items, plus each repo's
-    manifest file contents for the Presence Signal's declared-dependency check."""
+    manifest file contents for the Presence Signal's declared-dependency check.
+
+    `owned_repos` (round 11, ADR-0012) is the Candidate's owned, non-fork repos
+    — exactly what `ingest_evidence` already fetches internally — carried on
+    the bundle so the Provenance Check knows which repos are in scope without
+    re-fetching them. Defaults to empty so every existing direct
+    `EvidenceBundle(items=..., manifests=...)` construction (scoring tests
+    that don't exercise Provenance Check at all) stays valid unchanged."""
 
     items: list[EvidenceItem]
     manifests: dict[str, dict[str, str]]  # repo full_name -> {filename: content}
+    owned_repos: list[Repo] = field(default_factory=list)
 
 
 def ingest_evidence(
@@ -101,7 +109,7 @@ def ingest_evidence(
                 continue
             items.append(_evidence_from_comment(repo, comment))
 
-    return EvidenceBundle(items=items, manifests=manifests)
+    return EvidenceBundle(items=items, manifests=manifests, owned_repos=owned_repos)
 
 
 def _dedupe_repos(repos: Iterable[Repo]) -> list[Repo]:

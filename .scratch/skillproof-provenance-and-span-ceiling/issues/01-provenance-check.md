@@ -1,0 +1,23 @@
+# 01 — Provenance Check: disqualify commits from repos with imported history
+
+**What to build:** Close the owned-repo authorship gap ADR-0004 leaves open — a Candidate importing another project's real git history into their own, non-forked repo currently passes Volume's `author = candidate` filter cleanly. Add a Provenance Check that silently, hard-disqualifies a repo's commits from Volume, Depth, and Span when its earliest commit's SHA is found elsewhere on GitHub, outside repos the Candidate owns.
+
+**Blocked by:** None — can start immediately
+
+**Status:** done
+
+- [x] A new persisted cache table records, per owned repo, whether a Provenance Check match was found — same shape as the existing `Sighting`/`SightingDecision` pattern (a plain SQLAlchemy model registered with `Base`, no migration tooling needed since this repo uses `create_all`). A positive match is permanent; the absence of a row means "not yet checked or last checked clean," not "confirmed clean forever."
+- [x] `GitHubClient` gains two new methods (implemented on both `RealGitHubClient` and `FakeGitHubClient`, following the existing abstract-method pattern): one to fetch a repo's actual earliest commit (by git history, not by what ingestion's existing filters happen to keep as evidence — a repo's true root commit may itself be filtered out as docs/config-only or empty, so this must be a dedicated fetch, not derived from already-ingested `EvidenceItem`s), and one to check whether a given commit SHA exists in any public repo not owned by the Candidate.
+- [x] `EvidenceBundle` gains a way to know which repos are in scope for the check (e.g. the owned-repo list `ingest_evidence` already computes internally) without the check needing to re-fetch it independently.
+- [x] A new module (mirroring `sightings.py`'s existing shape: a plain function taking `db` plus whatever else it needs, called from `verify_service.py` right after `ingest_evidence` returns and before scoring, not committing its own transaction) performs the check for each in-scope repo: consult the cache first; if no permanent match is cached, call the new `GitHubClient` methods, persist a new match if found, and leave no-match repos uncached.
+- [x] Every `EvidenceItem` belonging to a flagged repo is excluded from what scoring sees for every skill in this `/verify` call — before Presence/Volume/Depth/Span are computed. Presence's manifest-based check is unaffected by a flag, since a manifest declaration carries no authorship claim.
+- [x] No new `evidence_type` value, no new field on `EvidenceCardOut`, and no Candidate- or Recruiter-facing indication anywhere in the API surface that a Provenance Check exclusion occurred — the only observable effect is a lower (or "none"/"declared_only") Confidence Score.
+- [x] A fixture proves the exclusion: an owned repo's earliest commit SHA is fabricated to match a fixture external repo not owned by the candidate; that repo's commits don't count toward Volume/Depth/Span, but its manifest-declared Presence still does.
+- [x] A fixture proves permanent-match caching: two `/verify` calls against the same already-flagged repo result in only one earliest-commit-fetch-and-search round trip total (the second call reads the cached flag instead).
+- [x] A fixture proves clean repos are re-checked, not cached: two `/verify` calls against a clean repo each perform the check again.
+
+## Comments
+
+Implemented in full. New: `RepoProvenanceFlag` model (`models.py`), `GitHubClient.get_earliest_commit_sha`/`commit_exists_elsewhere` (abstract + `RealGitHubClient` + `FakeGitHubClient`), `EvidenceBundle.owned_repos` (defaulted, so every pre-existing direct `EvidenceBundle(...)` construction in `test_scoring.py` stayed valid unchanged), `provenance.py` module, wired into `verify_service.run_verification` right after `ingest_evidence`. Tests: `tests/test_provenance.py` (unit, 5 cases), `tests/test_real_github_client.py` (+6 cases covering `RealGitHubClient`'s pagination-to-last-page trick and the search-exclusion logic), `tests/test_api_flow.py` (+1 end-to-end case through the full `/verify` → Evidence Card flow). Full suite: 148 passed, mypy clean.
+
+`/code-review` (Standards + Spec axes) run afterward, two fixes applied: (1) Standards flagged `get_earliest_commit_sha` bypassing the `_get_json`/`_get_all_pages` path-relative convention by calling `_fetch_page` with a hand-built absolute URL — extracted a `_get_json_with_response` helper so it stays consistent with every other `GitHubClient` method. (2) Spec flagged the permanent-caching test only proving `commit_exists_elsewhere` is skipped on a cache hit, not `get_earliest_commit_sha` too — strengthened to count both. Re-ran full suite + mypy after both fixes: still 148 passed, clean.
