@@ -258,3 +258,37 @@ def test_get_manifest_files_retries_on_secondary_rate_limit_then_succeeds(monkey
 
     assert files["requirements.txt"] == "flask==3.0\n"
     assert attempts["requirements.txt"] == 2  # first call rate-limited, retried once
+
+
+def test_commit_exists_elsewhere_retries_on_primary_rate_limit_then_succeeds(monkeypatch):
+    """GitHub's Search API (commit_exists_elsewhere's endpoint) enforces its own,
+    much stricter 30/min quota, separate from the 5000/hr core REST limit every
+    other GitHubClient method uses. Exhausting it returns a plain 403 with
+    X-RateLimit-Remaining: 0 and an X-RateLimit-Reset epoch timestamp — no
+    Retry-After header and no 'secondary rate limit'/'abuse detection' wording,
+    so this is a genuinely different signal from the one
+    test_get_manifest_files_retries_on_secondary_rate_limit_then_succeeds covers.
+    Previously unhandled, this crashed the entire /verify call for every claimed
+    skill (not just the one Provenance Check), the first time a real Candidate
+    with several owned repos hit it."""
+    monkeypatch.setattr(github_client.time, "sleep", lambda seconds: None)
+    reset_at = 1_700_000_100.0
+    monkeypatch.setattr(github_client.time, "time", lambda: 1_700_000_000.0)
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(
+                403,
+                json={"message": "API rate limit exceeded for user ID 42."},
+                headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(reset_at)},
+            )
+        return httpx.Response(200, json={"items": []})
+
+    client = _client(handler)
+
+    result = client.commit_exists_elsewhere("token", "abc123", exclude_owner="octodev")
+
+    assert result is False
+    assert attempts["n"] == 2  # first call rate-limited, retried once

@@ -371,9 +371,10 @@ class RealGitHubClient(GitHubClient):
         return results
 
     def _fetch_page(self, token: str, url: str, params: dict | None, max_retries: int = 5):
-        """One page: handles auth errors, secondary-rate-limit backoff, and ETag
-        caching. Returns `(body, response)` — callers needing the next-page Link
-        header (`_get_all_pages`) read it off `response.links`."""
+        """One page: handles auth errors, rate-limit backoff (both secondary/
+        abuse-detection and a primary limit fully exhausted), and ETag caching.
+        Returns `(body, response)` — callers needing the next-page Link header
+        (`_get_all_pages`) read it off `response.links`."""
         cache_key = f"{url}?{params}"
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         cached_etag, cached_body = self._etag_cache.get(cache_key, (None, None))
@@ -387,7 +388,7 @@ class RealGitHubClient(GitHubClient):
                 return cached_body, response
             if response.status_code == 401:
                 raise GitHubAuthError("GitHub token is invalid or has been revoked")
-            if response.status_code == 403 and _is_secondary_rate_limit(response) and attempt < max_retries:
+            if response.status_code == 403 and _is_rate_limited(response) and attempt < max_retries:
                 time.sleep(_backoff_seconds(response, attempt))
                 attempt += 1
                 continue
@@ -409,8 +410,15 @@ def _append_unique(commits: list[CommitRecord], seen: set[tuple[str, str]], comm
     commits.append(commit)
 
 
-def _is_secondary_rate_limit(response: httpx.Response) -> bool:
+def _is_rate_limited(response: httpx.Response) -> bool:
+    """A 403 GitHub returns for either kind of rate limit: secondary/abuse-detection
+    (flagged by a Retry-After header, or by the message text when it isn't present)
+    or a primary limit fully exhausted (X-RateLimit-Remaining: 0) — the Search API's
+    much stricter 30/min quota, used by the Provenance Check's (round 11, ADR-0012)
+    commit_exists_elsewhere, hits the latter in practice under normal use, not abuse."""
     if response.headers.get("Retry-After"):
+        return True
+    if response.headers.get("X-RateLimit-Remaining") == "0":
         return True
     body_text = response.text.lower()
     return "secondary rate limit" in body_text or "abuse detection" in body_text
@@ -420,6 +428,13 @@ def _backoff_seconds(response: httpx.Response, attempt: int) -> float:
     retry_after = response.headers.get("Retry-After")
     if retry_after:
         return float(retry_after)
+    # A primary limit's reset time is a fixed point in time (epoch seconds), not
+    # attempt-dependent — wait exactly until then rather than guessing with
+    # exponential backoff, which could either undershoot (retry still rejected)
+    # or needlessly overshoot a already-short Search API window.
+    reset_at = response.headers.get("X-RateLimit-Reset")
+    if reset_at:
+        return max(float(reset_at) - time.time(), 1.0)
     return min(2**attempt, 60)
 
 
