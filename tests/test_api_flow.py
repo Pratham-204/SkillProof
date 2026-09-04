@@ -482,7 +482,11 @@ def test_search_and_semantics_requires_every_selected_skill(client, fake_github)
     matches_by_skill = {m["skill"]: m for m in match["matches"]}
     assert matches_by_skill["FastAPI"]["evidence_type"] == "verified"
     assert matches_by_skill["Django"]["evidence_type"] == "declared_only"
-    assert 0 < matches_by_skill["Django"]["confidence_score"] < matches_by_skill["FastAPI"]["confidence_score"]
+    # declared_only has zero qualifying (Depth/Span) evidence, so the Span
+    # Ceiling (ADR-0013) zeroes its score — evidence_type, not confidence_score,
+    # is what distinguishes it from "none" now.
+    assert matches_by_skill["Django"]["confidence_score"] == 0.0
+    assert matches_by_skill["FastAPI"]["confidence_score"] > 0
 
 
 def test_search_average_score_only_covers_selected_skills(client, fake_github):
@@ -537,7 +541,9 @@ def test_verify_produces_declared_only_for_a_manifest_dependency_never_touched(c
 
     card = client.get(f"/evidence-card/{candidate_id}").json()["cards"][0]
     assert card["evidence_type"] == "declared_only"
-    assert 0 < card["confidence_score"] < 0.3
+    # Zero qualifying (Depth/Span) evidence behind a declared_only card means
+    # the Span Ceiling (ADR-0013) zeroes its Presence-only score.
+    assert card["confidence_score"] == 0.0
     assert card["source_commits"] == []
 
 
@@ -628,4 +634,7 @@ def test_verify_excludes_flagged_owned_repo_commits_but_keeps_its_declared_prese
 
     django_card = cards["Django"]
     assert django_card["evidence_type"] == "declared_only"
-    assert django_card["confidence_score"] == 0.20  # Presence-only score, untouched by the flag
+    # Presence-only, untouched by the Provenance flag — but the Span Ceiling
+    # (ADR-0013) zeroes any declared_only score regardless, since it has zero
+    # qualifying (Depth/Span) evidence.
+    assert django_card["confidence_score"] == 0.0

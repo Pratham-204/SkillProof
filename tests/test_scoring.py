@@ -128,8 +128,10 @@ def test_volume_and_presence_from_matching_commits_with_no_depth_or_span_below_f
     assert result.evidence_type == "verified"
     assert result.source_commits == []
     assert result.temporal_span_days == 0
-    # confidence = 0.20*presence(1) + 0.40*volume(3/8) + 0.25*depth(0) + 0.15*span(0)
-    assert result.confidence_score == round(0.20 * 1 + 0.40 * (3 / 8), 4)
+    # Pre-Ceiling: 0.20*presence(1) + 0.40*volume(3/8) + 0.25*depth(0) + 0.15*span(0) = 0.35,
+    # but the Span Ceiling (ADR-0013) multiplies by span_days/(span_days+K) = 0/(0+K) = 0,
+    # since no item cleared the Depth qualifying floor to widen span_days beyond 0.
+    assert result.confidence_score == 0.0
 
 
 def test_declared_only_when_manifest_lists_a_dependency_never_touched_by_a_commit():
@@ -142,8 +144,10 @@ def test_declared_only_when_manifest_lists_a_dependency_never_touched_by_a_commi
 
     assert result.evidence_type == "declared_only"
     assert result.source_commits == []
-    # confidence = 0.20*presence(1) + everything else 0
-    assert result.confidence_score == 0.20
+    # Pre-Ceiling: 0.20*presence(1) + everything else 0 = 0.20, but the Span
+    # Ceiling (ADR-0013) multiplies by span_days/(span_days+K) = 0/(0+K) = 0
+    # since there's no qualifying evidence at all to produce a nonzero span_days.
+    assert result.confidence_score == 0.0
 
 
 def test_commit_message_mentioning_a_skill_does_not_count_toward_volume_on_its_own():
@@ -314,7 +318,11 @@ def test_score_skill_matches_each_batched_vector_back_to_its_own_item(fake_embed
 
 
 def test_fake_backend_pins_the_exact_discount_on_commit_message_depth(fake_embeddings):
+    # Dated 100 days apart (rather than identically) so span_days is nonzero and
+    # the Span Ceiling (ADR-0013) doesn't collapse the whole score to 0 before
+    # the discount's effect on Depth can be observed in the final number.
     text = "uses fastapi for the api layer"
+    span_days = 100
     fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
     fake_embeddings.vectors_by_text[text] = np.array([1.0, 0.0])  # cosine similarity to the skill vector: exactly 1.0
     items = [
@@ -324,7 +332,7 @@ def test_fake_backend_pins_the_exact_discount_on_commit_message_depth(fake_embed
             ref="c1",
             url="https://example.com/c1",
             text=text,
-            date=_NOW,
+            date=_NOW - timedelta(days=span_days),
             diff_text=QUALIFYING_DIFF_TEXT,
         ),
         EvidenceItem(
@@ -344,11 +352,98 @@ def test_fake_backend_pins_the_exact_discount_on_commit_message_depth(fake_embed
     by_kind = {ref.kind: ref.similarity for ref in result.source_commits}
     assert by_kind["pr_comment"] == 1.0
     assert by_kind["commit"] == 1.0
+    assert result.temporal_span_days == span_days
 
     # ...but the discount still lowers the commit message's actual contribution
     # to Depth: depth = mean(1.0 * DEPTH_COMMIT_MESSAGE_DISCOUNT, 1.0) = 0.8, so
-    # confidence = 0.20*presence(1) + 0.40*volume(1/6) + 0.25*depth(0.8) + 0.15*span(0)
+    # pre-Ceiling confidence = 0.20*presence(1) + 0.40*volume(1/6) + 0.25*depth(0.8) + 0.15*span,
+    # then multiplied by the Span Ceiling factor for span_days=100.
     expected_depth = (1.0 * scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT + 1.0) / 2
     assert expected_depth == 0.8
-    expected_confidence = round(0.20 * 1 + 0.40 * (1 / 6) + 0.25 * expected_depth + 0.15 * 0, 4)
+    span = span_days / (span_days + scoring.SPAN_SATURATION_DAYS)
+    pre_ceiling = 0.20 * 1 + 0.40 * (1 / 6) + 0.25 * expected_depth + 0.15 * span
+    span_ceiling = span_days / (span_days + scoring.SPAN_CEILING_SATURATION_DAYS)
+    expected_confidence = round(pre_ceiling * span_ceiling, 4)
     assert result.confidence_score == expected_confidence
+
+
+# --- Span Ceiling (ADR-0013) ---
+
+
+def _qualifying_commits(count: int, *, span_days: int) -> list[EvidenceItem]:
+    """`count` commits, identical qualifying text, evenly spaced from
+    `span_days` ago up to now — lets a caller hold Presence/Volume/Depth fixed
+    while only span_days varies. The oldest (i=0) and newest (i=count-1)
+    commits are exactly `span_days` apart; that's all temporal_span_days sees."""
+    return [
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref=f"c{i}",
+            url=f"https://example.com/c{i}",
+            text="fake commit message",
+            date=_NOW - timedelta(days=span_days - span_days * i // (count - 1)),
+            diff_text=QUALIFYING_DIFF_TEXT,
+        )
+        for i in range(count)
+    ]
+
+
+def test_span_ceiling_widens_the_gap_between_a_burst_and_sustained_activity_beyond_spans_own_weight(fake_embeddings):
+    """Before the Span Ceiling (ADR-0013), two Candidates with identical
+    Presence/Volume/Depth could differ by no more than Span's own 0.15 weight,
+    no matter how different their span_days — a short, intense burst was
+    discounted by at most that 15% share. Same qualifying commit count and
+    text (so Presence/Volume/Depth match exactly) for both fixtures; only the
+    date spread differs: a 3-day burst vs. a 400-day sustained history."""
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text["fake commit message"] = np.array([1.0, 0.0])
+
+    burst_bundle = EvidenceBundle(items=_qualifying_commits(5, span_days=3), manifests={})
+    sustained_bundle = EvidenceBundle(items=_qualifying_commits(5, span_days=400), manifests={})
+
+    burst = scoring.score_skill(burst_bundle, "FastAPI")
+    sustained = scoring.score_skill(sustained_bundle, "FastAPI")
+
+    assert burst.temporal_span_days == 3
+    assert sustained.temporal_span_days == 400
+
+    # Pre-Ceiling, the two scores could only ever differ by Span's own weighted
+    # slot — bounded above by SPAN_WEIGHT itself.
+    pre_ceiling_gap = scoring.SPAN_WEIGHT * (
+        (400 / (400 + scoring.SPAN_SATURATION_DAYS)) - (3 / (3 + scoring.SPAN_SATURATION_DAYS))
+    )
+    assert pre_ceiling_gap < scoring.SPAN_WEIGHT
+
+    actual_gap = sustained.confidence_score - burst.confidence_score
+    assert actual_gap > 0
+    # The Ceiling widens the gap well past what Span's weight alone could produce.
+    assert actual_gap > pre_ceiling_gap
+
+
+def test_span_ceiling_zeroes_the_score_when_there_is_no_qualifying_evidence(fake_embeddings):
+    """Floor case: span_days = 0 (no item cleared the Depth qualifying floor)
+    must feed the Ceiling's n/(n+K) saturation curve without a divide-by-zero
+    or other edge-case failure — and correctly zeroes the whole score, since
+    n/(n+K) at n=0 is exactly 0 for any fixed positive K."""
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text["unrelated text, below the qualifying floor"] = _unit_vector_at_cosine(0.1)
+    items = [
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref=f"c{i}",
+            url=f"https://example.com/c{i}",
+            text="unrelated text, below the qualifying floor",
+            date=_NOW - timedelta(days=i),
+            diff_text=QUALIFYING_DIFF_TEXT,
+        )
+        for i in range(3)
+    ]
+    bundle = EvidenceBundle(items=items, manifests={"octodev/skillproof-lib": {"requirements.txt": "fastapi==0.1"}})
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    assert result.temporal_span_days == 0
+    assert result.evidence_type == "verified"  # real Presence + Volume, just no Depth/Span-qualifying item
+    assert result.confidence_score == 0.0
