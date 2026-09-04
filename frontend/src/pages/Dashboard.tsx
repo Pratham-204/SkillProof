@@ -59,6 +59,15 @@ export default function Dashboard() {
     })
   }
 
+  // One button, not two (ADR-0014): reconnecting a revoked token and connecting a
+  // different GitHub account are the same /auth/github/login redirect underneath, so
+  // this single block covers both instead of a separate needs_reconnect-only banner.
+  const connectAccountBannerClassName = `mb-4 rounded-lg border p-3 text-sm ${
+    candidate.needs_reconnect
+      ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300'
+      : 'border-neutral-200 text-neutral-500 dark:border-neutral-800'
+  }`
+
   return (
     <main className="mx-auto flex min-h-svh max-w-xl flex-col items-center justify-center gap-8 px-6 py-16 text-center">
       <div className="w-full">
@@ -67,15 +76,22 @@ export default function Dashboard() {
           Signed in as <span className="font-mono">{candidate.github_login}</span>
         </p>
 
-        {candidate.needs_reconnect && (
-          <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
-            Your GitHub access was revoked, so this data may be stale.{' '}
-            <a href={GITHUB_LOGIN_URL} className="font-medium underline underline-offset-2">
-              Reconnect GitHub
-            </a>{' '}
-            to re-verify with fresh access.
+        <div className={connectAccountBannerClassName}>
+          {candidate.needs_reconnect && (
+            <p className="mb-2 font-medium">Your GitHub access was revoked, so this data may be stale.</p>
+          )}
+          <a
+            href={GITHUB_LOGIN_URL}
+            className="inline-block rounded-full border border-neutral-400 px-4 py-1.5 font-medium text-neutral-900 dark:border-neutral-600 dark:text-white"
+          >
+            Connect GitHub Account
+          </a>
+          <p className="mt-2 text-xs">
+            Use this to reconnect if your access was revoked, or to connect a different GitHub account instead. To
+            switch accounts, make sure you're already signed into that other account on github.com in this browser
+            first — GitHub doesn't let this app show an account picker.
           </p>
-        )}
+        </div>
 
         <div className="mb-6 flex flex-col gap-3 rounded-xl border border-neutral-200 p-4 text-left dark:border-neutral-800">
           <div className="flex items-center justify-between gap-3">

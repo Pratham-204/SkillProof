@@ -90,11 +90,27 @@ describe('Dashboard', () => {
     expect(screen.getByRole('link', { name: /claim more skills/i })).toHaveAttribute('href', '/claim')
   })
 
-  it('shows a reconnect prompt when needs_reconnect is set', async () => {
+  it('always shows a Connect GitHub Account button, even when nothing is wrong', async () => {
+    renderDashboard()
+    await screen.findByText('Python')
+
+    expect(screen.getByRole('link', { name: /connect github account/i })).toHaveAttribute(
+      'href',
+      api.GITHUB_LOGIN_URL,
+    )
+    expect(screen.getByText(/switch accounts/i)).toBeInTheDocument()
+    expect(screen.queryByText(/your github access was revoked/i)).not.toBeInTheDocument()
+  })
+
+  it('merges the revoked-access warning into the same button instead of a separate banner', async () => {
     vi.mocked(api.getMe).mockResolvedValue({ ...CANDIDATE, needs_reconnect: true })
     renderDashboard()
 
-    expect(await screen.findByText(/reconnect github/i)).toBeInTheDocument()
+    expect(await screen.findByText(/your github access was revoked/i)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /connect github account/i })).toHaveAttribute(
+      'href',
+      api.GITHUB_LOGIN_URL,
+    )
   })
 
   it('reflects the toggle immediately, before the network call resolves', async () => {
