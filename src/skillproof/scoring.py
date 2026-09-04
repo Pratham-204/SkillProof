@@ -27,6 +27,15 @@ DEPTH_TOP_N = 3
 # evidence over time can. Not a fifth Signal; ADR-0004's weights are untouched.
 SPAN_CEILING_SATURATION_DAYS = 365  # span_ceiling = span_days / (span_days + this)
 
+# A single qualifying commit (or several, all dated the same day) has
+# span_days = 0 exactly like a card with no qualifying evidence at all — but
+# it isn't the same situation: it's one real, similarity-cleared piece of
+# evidence with a degenerate span, not an absence of evidence. Flooring the
+# multiplier (only when qualifying evidence exists at all) keeps that case
+# from being crushed to a literal zero the way true no-evidence cards
+# correctly are, while still suppressing it far below sustained evidence.
+SPAN_CEILING_FLOOR = 0.1
+
 # Applied to EvidenceItem.is_self_authored items (see its docstring for why) so
 # Depth isn't inflatable just by writing an elaborate commit message
 # (hybrid-scoring ticket 03, ADR-0004).
@@ -126,11 +135,15 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
     # Span Ceiling (ADR-0013), applied after the four-Signal sum and its
     # clamp: a separate saturating multiplier on span_days alone, using its
     # own (larger) constant so unsustained evidence stays capped low no
-    # matter how strong Presence/Volume/Depth are. span_days = 0 (no
-    # qualifying evidence) correctly yields a 0 multiplier, not a
+    # matter how strong Presence/Volume/Depth are. span_days = 0 with no
+    # qualifying evidence at all correctly yields a 0 multiplier, not a
     # divide-by-zero, since SPAN_CEILING_SATURATION_DAYS is a fixed positive
-    # constant, never 0.
+    # constant, never 0. span_days = 0 with real qualifying evidence (a
+    # single commit, or several all dated the same day) is floored instead
+    # of also going to 0 — see SPAN_CEILING_FLOOR's docstring above.
     span_ceiling = span_days / (span_days + SPAN_CEILING_SATURATION_DAYS)
+    if qualifying:
+        span_ceiling = max(span_ceiling, SPAN_CEILING_FLOOR)
     confidence_score *= span_ceiling
 
     # source_commits mirrors top_n, not the full qualifying set: it's meant to

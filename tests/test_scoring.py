@@ -447,3 +447,37 @@ def test_span_ceiling_zeroes_the_score_when_there_is_no_qualifying_evidence(fake
     assert result.temporal_span_days == 0
     assert result.evidence_type == "verified"  # real Presence + Volume, just no Depth/Span-qualifying item
     assert result.confidence_score == 0.0
+
+
+def test_span_ceiling_floors_rather_than_zeroes_a_single_qualifying_commit(fake_embeddings):
+    """A single Depth-qualifying commit also has span_days = 0 (max == min, one
+    date) — mathematically identical to the true no-qualifying-evidence case
+    above — but it isn't the same situation: it's one real, similarity-cleared
+    piece of evidence, not an absence of evidence. SPAN_CEILING_FLOOR keeps it
+    from being crushed to a literal 0.0 in an Evidence Card the way the true
+    zero-evidence case correctly is, while still suppressing it far below what
+    sustained evidence would score."""
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text["a single strong commit"] = np.array([1.0, 0.0])
+    items = [
+        EvidenceItem(
+            kind="commit",
+            repo="octodev/skillproof-lib",
+            ref="c1",
+            url="https://example.com/c1",
+            text="a single strong commit",
+            date=_NOW,
+            diff_text=QUALIFYING_DIFF_TEXT,
+        )
+    ]
+    bundle = EvidenceBundle(items=items, manifests={})
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    assert result.temporal_span_days == 0
+    assert result.confidence_score > 0.0
+    # presence(1) + volume(1/6) + depth(0.6, discounted commit-message match), span(0);
+    # then floored (not zeroed) by the Ceiling since qualifying evidence is nonempty.
+    pre_ceiling = 0.20 * 1 + 0.40 * (1 / 6) + 0.25 * (1.0 * scoring.DEPTH_COMMIT_MESSAGE_DISCOUNT) + 0.15 * 0
+    expected_confidence = round(pre_ceiling * scoring.SPAN_CEILING_FLOOR, 4)
+    assert result.confidence_score == expected_confidence
