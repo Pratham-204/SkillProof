@@ -114,6 +114,21 @@ def test_switching_github_account_replaces_session_without_merging_candidates(
         db.close()
 
 
+def test_reused_oauth_code_redirects_instead_of_crashing(client, fake_github):
+    """Regression: GitHub's OAuth `code` is single-use and short-lived, so a
+    double-submitted /callback (browser back/reload, a stale or prefetched
+    link) hits this route again with an already-consumed code. That raised an
+    uncaught GitHubAuthError straight out of the route with no handler for it
+    anywhere in the app, surfacing to the Candidate as a raw 500 instead of a
+    clean retry path — this must redirect back into the app instead, where
+    "Connect GitHub Account" is safe to click again with a fresh code."""
+    fake_github.invalid_codes.add("reused-code")
+
+    response = client.get("/auth/github/callback?code=reused-code", follow_redirects=False)
+
+    assert response.status_code in (302, 307)
+
+
 def test_first_login_with_no_existing_session_cookie_succeeds(client, fake_github):
     """No session cookie exists on a brand-new browser's first login — the
     cleanup step must be a no-op here, not an error."""

@@ -6,7 +6,7 @@ from skillproof import security
 from skillproof.config import get_settings
 from skillproof.db import get_db
 from skillproof.deps import get_current_candidate, get_github_client, get_session_by_cookie
-from skillproof.github_client import GitHubClient
+from skillproof.github_client import GitHubAuthError, GitHubClient
 from skillproof.models import Candidate, CandidateSession
 from skillproof.schemas import CandidateOut, SearchableUpdate
 
@@ -46,8 +46,17 @@ def callback(
     candidate_id is intentionally public.
     """
     settings = get_settings()
-    token = github_client.exchange_code_for_token(code)
-    user = github_client.get_authenticated_user(token)
+    try:
+        token = github_client.exchange_code_for_token(code)
+        user = github_client.get_authenticated_user(token)
+    except GitHubAuthError:
+        # GitHub's OAuth `code` is single-use and short-lived — a double-submitted
+        # callback (browser back/reload, link prefetch, or a stale/reused link)
+        # hits this route again with an already-consumed code and would
+        # otherwise surface as a raw 500. Send the Candidate back into the app
+        # instead, where "Connect GitHub Account" is safe to click again with a
+        # fresh code.
+        return RedirectResponse(settings.github_oauth_success_redirect)
 
     candidate = db.query(Candidate).filter_by(github_user_id=user.id).one_or_none()
     if candidate is None:

@@ -508,8 +508,15 @@ class FakeGitHubClient(GitHubClient):
     pr_comments: dict[str, list[PrCommentRecord]] = field(default_factory=dict)
     manifest_files: dict[str, dict[str, str]] = field(default_factory=dict)
     revoked_tokens: set[str] = field(default_factory=set)
+    invalid_codes: set[str] = field(default_factory=set)
 
     def exchange_code_for_token(self, code: str) -> str:
+        if code in self.invalid_codes:
+            # Simulates GitHub rejecting an already-consumed or expired OAuth
+            # `code` (a double-submitted /callback), the same failure a real
+            # GitHubAuthError from RealGitHubClient.exchange_code_for_token
+            # would raise.
+            raise GitHubAuthError("GitHub OAuth code is invalid or has already been used")
         return self.tokens_by_code.get(code, f"fake-token-for-{code}")
 
     def get_authenticated_user(self, token: str) -> GitHubUser:
