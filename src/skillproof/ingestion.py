@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -81,6 +82,13 @@ def ingest_evidence(
     progress during commit-fetching (the dominant cost here) for the verify SSE
     stream (ticket 03) — it doesn't also cover the separate manifest/PR-comment
     loops below.
+
+    The manifest and PR-review-comment loops below fan out across repos
+    concurrently (github-scan-performance ticket 03) via a thread pool local to
+    this call, rather than finishing one repo before starting the next. This is
+    a separate pool from any `client` keeps internally (e.g. `RealGitHubClient`'s
+    own per-manifest-filename pool) — nesting into that one instead would risk
+    every one of its workers blocking on a queued task none of them is free to run.
     """
     owned_repos = client.list_owned_public_repos(token, login)
     merged_prs = client.list_merged_prs(token, login)
@@ -88,18 +96,21 @@ def ingest_evidence(
     all_repos = owned_repos + external_repos
     protected_filenames = taxonomy.all_detection_pattern_config_files()
 
-    manifests = {repo.full_name: client.get_manifest_files(token, repo) for repo in all_repos}
-
     items: list[EvidenceItem] = []
 
-    for commit in client.list_qualifying_commits(token, login, on_repo_scanned=on_repo_scanned):
-        _append_commit_evidence(items, commit, protected_filenames)
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="ingest-repo") as pool:
+        manifest_futures = [(repo, pool.submit(client.get_manifest_files, token, repo)) for repo in all_repos]
+        manifests = {repo.full_name: future.result() for repo, future in manifest_futures}
 
-    for repo in all_repos:
-        for comment in client.list_pr_review_comments(token, repo, login):
-            if heuristics.is_low_effort_comment(comment.body):
-                continue
-            items.append(_evidence_from_comment(repo, comment))
+        for commit in client.list_qualifying_commits(token, login, on_repo_scanned=on_repo_scanned):
+            _append_commit_evidence(items, commit, protected_filenames)
+
+        comment_futures = [(repo, pool.submit(client.list_pr_review_comments, token, repo, login)) for repo in all_repos]
+        for repo, future in comment_futures:
+            for comment in future.result():
+                if heuristics.is_low_effort_comment(comment.body):
+                    continue
+                items.append(_evidence_from_comment(repo, comment))
 
     return EvidenceBundle(items=items, manifests=manifests)
 

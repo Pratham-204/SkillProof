@@ -134,6 +134,7 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
             db.commit()
             progress_bus.publish(candidate_id, ProgressEvent(kind="reveal", detail=skill))
     finally:
+        github_client.close()
         progress_bus.publish(candidate_id, ProgressEvent(kind="done", detail=""))
         db.close()
 

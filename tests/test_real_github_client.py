@@ -9,6 +9,8 @@ real network transport), so these tests drive it directly with
 """
 
 import base64
+import threading
+import time
 
 import httpx
 import pytest
@@ -19,6 +21,26 @@ from skillproof.github_client import GitHubAuthError, RealGitHubClient, Repo
 
 def _client(handler) -> RealGitHubClient:
     return RealGitHubClient(client_id="id", client_secret="secret", transport=httpx.MockTransport(handler))
+
+
+class _ConcurrencyTracker:
+    """Records the peak number of overlapping in-flight requests a MockTransport
+    handler sees, so a test can prove requests actually ran concurrently rather
+    than merely returning correct results one at a time."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._current = 0
+        self.peak = 0
+
+    def enter(self) -> None:
+        with self._lock:
+            self._current += 1
+            self.peak = max(self.peak, self._current)
+
+    def exit(self) -> None:
+        with self._lock:
+            self._current -= 1
 
 
 def test_list_owned_public_repos_follows_link_header_pagination():
@@ -176,3 +198,124 @@ def test_get_manifest_files_retries_on_secondary_rate_limit_then_succeeds(monkey
 
     assert files["requirements.txt"] == "flask==3.0\n"
     assert attempts["requirements.txt"] == 2  # first call rate-limited, retried once
+
+
+def test_get_manifest_files_checks_filenames_concurrently():
+    """Manifest detection checks ~20 filenames per repo (github-scan-performance
+    ticket 01). Each handler call sleeps briefly, so more than one request in
+    flight at once is only possible if they're issued concurrently — a serial
+    implementation would never show a peak above 1."""
+    tracker = _ConcurrencyTracker()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tracker.enter()
+        try:
+            time.sleep(0.05)
+            return httpx.Response(404, json={"message": "Not Found"})
+        finally:
+            tracker.exit()
+
+    client = _client(handler)
+
+    files = client.get_manifest_files("token", Repo(owner="octodev", name="skillproof-lib"))
+
+    assert files == {}
+    assert tracker.peak > 1
+
+
+def test_commit_detail_fetch_runs_concurrently():
+    """Fetching each qualifying commit's diff is the N+1 hot path ticket 01
+    targets. Assert multiple commit-detail requests are genuinely in flight at
+    once, not fetched one at a time."""
+    tracker = _ConcurrencyTracker()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/octodev/repos":
+            return httpx.Response(200, json=[{"owner": {"login": "octodev"}, "name": "repo-a", "fork": False}])
+        if request.url.path == "/search/issues":
+            return httpx.Response(200, json={"items": []})
+        if request.url.path == "/repos/octodev/repo-a/commits":
+            return httpx.Response(200, json=[{"sha": f"sha{i}"} for i in range(5)])
+        tracker.enter()
+        try:
+            time.sleep(0.05)
+            return httpx.Response(
+                200,
+                json={
+                    "commit": {"message": "msg", "author": {"date": "2024-01-01T00:00:00Z"}},
+                    "files": [],
+                    "html_url": "https://github.com/octodev/repo-a/commit/x",
+                },
+            )
+        finally:
+            tracker.exit()
+
+    client = _client(handler)
+
+    commits = client.list_qualifying_commits("token", "octodev")
+
+    assert len(commits) == 5
+    assert tracker.peak > 1
+
+
+def test_repos_are_processed_concurrently():
+    """Owned repos (github-scan-performance ticket 03) should overlap rather
+    than one repo's commit-list call finishing entirely before the next
+    starts."""
+    tracker = _ConcurrencyTracker()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/octodev/repos":
+            return httpx.Response(
+                200,
+                json=[
+                    {"owner": {"login": "octodev"}, "name": "repo-a", "fork": False},
+                    {"owner": {"login": "octodev"}, "name": "repo-b", "fork": False},
+                ],
+            )
+        if request.url.path == "/search/issues":
+            return httpx.Response(200, json={"items": []})
+        if request.url.path.endswith("/commits"):
+            tracker.enter()
+            try:
+                time.sleep(0.05)
+                return httpx.Response(200, json=[])
+            finally:
+                tracker.exit()
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = _client(handler)
+
+    client.list_qualifying_commits("token", "octodev")
+
+    assert tracker.peak > 1
+
+
+def test_rate_limit_gate_is_held_by_the_backing_off_thread(monkeypatch):
+    """When a request hits a secondary rate limit, the shared gate
+    (`_rate_limit_gate`, ticket 02) must be held for the duration of the
+    backoff sleep — that's the state that makes every other thread's next
+    request block on the same cooldown instead of independently sleeping and
+    re-triggering the same limit. Checking the lock's state at the instant
+    `time.sleep` is called proves the mechanism directly, without relying on
+    real wall-clock timing between threads."""
+    observed = {"gate_locked_during_sleep": None}
+
+    def fake_sleep(seconds: float) -> None:
+        observed["gate_locked_during_sleep"] = client._rate_limit_gate.locked()
+
+    monkeypatch.setattr(github_client.time, "sleep", fake_sleep)
+
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(403, headers={"Retry-After": "1"}, text="secondary rate limit exceeded")
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = _client(handler)
+
+    client.get_manifest_files("token", Repo(owner="octodev", name="skillproof-lib"))
+
+    assert observed["gate_locked_during_sleep"] is True

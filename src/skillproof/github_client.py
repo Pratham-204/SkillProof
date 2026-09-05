@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TypeVar
 from urllib.parse import urlparse
 
 import httpx
@@ -36,6 +39,10 @@ MANIFEST_FILENAMES = (
     "stack.yaml",
     "Project.toml",
 )
+
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
 
 
 class GitHubAuthError(Exception):
@@ -133,11 +140,16 @@ class GitHubClient(ABC):
         adapter, so there's no method left to call that would let an external repo's
         unscoped commit history count. Adapters only implement the two fetch hooks below.
 
+        Each repo's commits are gathered via `_map_repos` (github-scan-performance
+        ticket 03), which defaults to sequential but lets `RealGitHubClient` fetch
+        multiple repos concurrently without this orchestration knowing or caring.
+
         `on_repo_scanned`, if given, is called once per unique repo (owned or
         external) right after that repo's commits have been gathered — real,
         already-happened per-repo progress for the verify SSE stream (ticket 03),
         not a fabricated signal. A repo with more than one merged PR is only
-        announced once, on first encounter.
+        announced once, on first encounter. Announcing is guarded by a lock since
+        `_map_repos` may call this from more than one thread concurrently.
         """
         owned_repos = self.list_owned_public_repos(token, login)
         merged_prs = self.list_merged_prs(token, login)
@@ -145,21 +157,42 @@ class GitHubClient(ABC):
         commits: list[CommitRecord] = []
         seen: set[tuple[str, str]] = set()
         announced: set[str] = set()
+        announce_lock = threading.Lock()
 
         def _announce(repo: Repo) -> None:
-            if on_repo_scanned is not None and repo.full_name not in announced:
+            if on_repo_scanned is None:
+                return
+            with announce_lock:
+                if repo.full_name in announced:
+                    return
                 announced.add(repo.full_name)
-                on_repo_scanned(repo.full_name)
+            on_repo_scanned(repo.full_name)
 
-        for repo in owned_repos:
-            for commit in self._fetch_owned_commits(token, repo, login):
-                _append_unique(commits, seen, commit)
+        def _owned_task(repo: Repo) -> list[CommitRecord]:
+            result = self._fetch_owned_commits(token, repo, login)
             _announce(repo)
-        for pr in merged_prs:
-            for commit in self._fetch_pr_commits(token, pr.repo, pr.number):
-                _append_unique(commits, seen, commit)
+            return result
+
+        def _pr_task(pr: MergedPullRequest) -> list[CommitRecord]:
+            result = self._fetch_pr_commits(token, pr.repo, pr.number)
             _announce(pr.repo)
+            return result
+
+        for result in self._map_repos(_owned_task, owned_repos):
+            for commit in result:
+                _append_unique(commits, seen, commit)
+        for result in self._map_repos(_pr_task, merged_prs):
+            for commit in result:
+                _append_unique(commits, seen, commit)
         return commits
+
+    def _map_repos(self, fn: Callable[[_T], _R], items: Iterable[_T]) -> list[_R]:
+        """Runs `fn` once per item, in order. Sequential by default (used as-is by
+        `FakeGitHubClient`, where fixture reads are instant); `RealGitHubClient`
+        overrides this to fan the calls out across its own repo-level thread pool,
+        since that's the only adapter where per-repo network latency is worth
+        overlapping (github-scan-performance ticket 03)."""
+        return [fn(item) for item in items]
 
     @abstractmethod
     def _fetch_owned_commits(self, token: str, repo: Repo, author_login: str) -> list[CommitRecord]:
@@ -170,6 +203,11 @@ class GitHubClient(ABC):
     def _fetch_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
         """Commits belonging to one specific (merged) PR, for external-repo Volume scoping."""
         ...
+
+    def close(self) -> None:
+        """Release any held resources (network client, thread pools). No-op by
+        default; `RealGitHubClient` overrides this to shut down its executors
+        and HTTP client once a scan finishes."""
 
 
 class RealGitHubClient(GitHubClient):
@@ -189,7 +227,25 @@ class RealGitHubClient(GitHubClient):
         self._client_id = client_id or settings.github_client_id
         self._client_secret = client_secret or settings.github_client_secret
         self._etag_cache: dict[str, tuple[str, object]] = {}
+        self._etag_lock = threading.Lock()
         self._client = httpx.Client(transport=transport, timeout=15)
+
+        # Shared across a whole scan (github-scan-performance tickets 01/03), not
+        # recreated per call. Two separate pools rather than one: `_repo_pool`'s
+        # workers call back into methods (`_fetch_owned_commits` etc.) that
+        # themselves submit to `_item_pool` and wait on the result — submitting
+        # that inner work to the *same* bounded pool the outer task is running in
+        # would starve it (every worker blocked waiting on a queued task no
+        # worker is free to run). Distinct pools with no cycle between them can't
+        # deadlock that way.
+        self._item_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="github-item")
+        self._repo_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="github-repo")
+
+        # A shared cooldown gate (ticket 02): a rate-limited response makes the
+        # thread that saw it hold this lock for the backoff duration, so every
+        # other thread's next request blocks acquiring the same lock instead of
+        # each independently sleeping and re-discovering the same 403.
+        self._rate_limit_gate = threading.Lock()
 
     def exchange_code_for_token(self, code: str) -> str:
         settings = get_settings()
@@ -246,13 +302,24 @@ class RealGitHubClient(GitHubClient):
                 # commits yet (empty repo, no default branch) — zero commits, not an error.
                 return []
             raise
-        return [self._commit_record(token, repo, c["sha"]) for c in commits]
+        return self._commit_records(token, repo, [c["sha"] for c in commits])
 
     def _fetch_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
         commits = self._get_all_pages(
             token, f"/repos/{repo.full_name}/pulls/{pr_number}/commits", params={"per_page": 100}
         )
-        return [self._commit_record(token, repo, c["sha"]) for c in commits]
+        return self._commit_records(token, repo, [c["sha"] for c in commits])
+
+    def _commit_records(self, token: str, repo: Repo, shas: list[str]) -> list[CommitRecord]:
+        """Fetches every commit's diff concurrently instead of one at a time
+        (github-scan-performance ticket 01) — this was the dominant N+1 cost in a
+        scan, one extra request per commit. Futures are built and gathered in
+        `shas` order, so the result order is unchanged even though completion
+        order isn't."""
+        if not shas:
+            return []
+        futures = [self._item_pool.submit(self._commit_record, token, repo, sha) for sha in shas]
+        return [future.result() for future in futures]
 
     def _commit_record(self, token: str, repo: Repo, sha: str) -> CommitRecord:
         detail = self._get_json(token, f"/repos/{repo.full_name}/commits/{sha}")
@@ -283,18 +350,46 @@ class RealGitHubClient(GitHubClient):
         ]
 
     def get_manifest_files(self, token: str, repo: Repo) -> dict[str, str]:
-        result: dict[str, str] = {}
-        for filename in MANIFEST_FILENAMES:
+        """Checks all `MANIFEST_FILENAMES` concurrently instead of one at a time
+        (github-scan-performance ticket 01) — this was up to 20 sequential
+        requests per repo just to detect which manifests exist."""
+
+        def _fetch_one(filename: str) -> tuple[str, str | None]:
             try:
                 data = self._get_json(token, f"/repos/{repo.full_name}/contents/{filename}")
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 404:
-                    continue
+                    return filename, None
                 raise
             content = data.get("content") if isinstance(data, dict) else None
-            if content:
-                result[filename] = base64.b64decode(content).decode("utf-8", errors="replace")
+            if not content:
+                return filename, None
+            return filename, base64.b64decode(content).decode("utf-8", errors="replace")
+
+        futures = [self._item_pool.submit(_fetch_one, filename) for filename in MANIFEST_FILENAMES]
+        result: dict[str, str] = {}
+        for future in futures:
+            filename, content = future.result()
+            if content is not None:
+                result[filename] = content
         return result
+
+    def _map_repos(self, fn: Callable[[_T], _R], items: Iterable[_T]) -> list[_R]:
+        """Fans repos out across the shared repo-level pool (ticket 03) instead of
+        finishing one repo's commits before starting the next. Uses its own pool,
+        separate from `_item_pool`, so `fn` (which itself submits per-commit work
+        to `_item_pool` and waits) can't deadlock waiting on a pool its own
+        worker thread occupies."""
+        items = list(items)
+        if not items:
+            return []
+        futures = [self._repo_pool.submit(fn, item) for item in items]
+        return [future.result() for future in futures]
+
+    def close(self) -> None:
+        self._item_pool.shutdown(wait=False)
+        self._repo_pool.shutdown(wait=False)
+        self._client.close()
 
     def _get_json(self, token: str, path: str, params: dict | None = None):
         """One single-object response — `/user`, a commit's detail, a manifest file.
@@ -324,29 +419,42 @@ class RealGitHubClient(GitHubClient):
     def _fetch_page(self, token: str, url: str, params: dict | None, max_retries: int = 5):
         """One page: handles auth errors, secondary-rate-limit backoff, and ETag
         caching. Returns `(body, response)` — callers needing the next-page Link
-        header (`_get_all_pages`) read it off `response.links`."""
+        header (`_get_all_pages`) read it off `response.links`.
+
+        Runs concurrently from multiple threads once a scan is parallelized
+        (tickets 01/03), so both the ETag cache and rate-limit backoff below are
+        shared, locked state rather than assuming single-threaded access.
+        """
         cache_key = f"{url}?{params}"
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-        cached_etag, cached_body = self._etag_cache.get(cache_key, (None, None))
+        with self._etag_lock:
+            cached_etag, cached_body = self._etag_cache.get(cache_key, (None, None))
         if cached_etag:
             headers["If-None-Match"] = cached_etag
 
         attempt = 0
         while True:
+            # Blocks here for as long as any thread (this one or another) is
+            # currently backing off below — one shared cooldown instead of every
+            # thread independently sleeping and re-triggering the same limit.
+            with self._rate_limit_gate:
+                pass
             response = self._client.get(url, headers=headers, params=params)
             if response.status_code == 304 and cached_body is not None:
                 return cached_body, response
             if response.status_code == 401:
                 raise GitHubAuthError("GitHub token is invalid or has been revoked")
             if response.status_code == 403 and _is_secondary_rate_limit(response) and attempt < max_retries:
-                time.sleep(_backoff_seconds(response, attempt))
+                with self._rate_limit_gate:
+                    time.sleep(_backoff_seconds(response, attempt))
                 attempt += 1
                 continue
             response.raise_for_status()
             body = response.json()
             etag = response.headers.get("ETag")
             if etag:
-                self._etag_cache[cache_key] = (etag, body)
+                with self._etag_lock:
+                    self._etag_cache[cache_key] = (etag, body)
             return body, response
 
 
