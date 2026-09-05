@@ -122,24 +122,6 @@ class GitHubClient(ABC):
         keyed by filename. Missing files are simply absent from the result, not an error."""
         ...
 
-    @abstractmethod
-    def get_earliest_commit_sha(self, token: str, repo: Repo) -> str | None:
-        """The SHA of `repo`'s actual first commit in git history — its true
-        root, not whatever ingestion's own filters happen to keep as evidence
-        (a repo's real first commit may itself be docs/config-only or empty
-        and never become an EvidenceItem at all). `None` for an empty repo
-        with no commits. Used only by the Provenance Check (round 11, ADR-0012)."""
-        ...
-
-    @abstractmethod
-    def commit_exists_elsewhere(self, token: str, sha: str, exclude_owner: str) -> bool:
-        """True if `sha` is found in any public repo not owned by `exclude_owner`
-        — the Provenance Check's (round 11, ADR-0012) signal that a repo's
-        history was imported rather than genuinely authored by its claimed
-        owner. A commit hash match is high-precision: two different commits
-        practically never share one by coincidence."""
-        ...
-
     def list_qualifying_commits(
         self, token: str, login: str, on_repo_scanned: Callable[[str], None] | None = None
     ) -> list[CommitRecord]:
@@ -314,42 +296,11 @@ class RealGitHubClient(GitHubClient):
                 result[filename] = base64.b64decode(content).decode("utf-8", errors="replace")
         return result
 
-    def get_earliest_commit_sha(self, token: str, repo: Repo) -> str | None:
-        try:
-            body, response = self._get_json_with_response(token, f"/repos/{repo.full_name}/commits", {"per_page": 1})
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 409:
-                return None  # empty repo, no default branch — same 409 as _fetch_owned_commits
-            raise
-        if not body:
-            return None
-        last_page_url = response.links.get("last", {}).get("url")
-        if last_page_url is None:
-            return body[0]["sha"]  # only one page: this single commit is both newest and oldest
-        last_page_body, _ = self._fetch_page(token, last_page_url, None)
-        if not last_page_body:
-            return None
-        return last_page_body[0]["sha"]  # per_page=1: the last page's one commit is the earliest
-
-    def commit_exists_elsewhere(self, token: str, sha: str, exclude_owner: str) -> bool:
-        data = self._get_json(token, "/search/commits", params={"q": f"hash:{sha}"})
-        for item in data.get("items", []):
-            owner = item.get("repository", {}).get("owner", {}).get("login", "")
-            if owner.lower() != exclude_owner.lower():
-                return True
-        return False
-
     def _get_json(self, token: str, path: str, params: dict | None = None):
         """One single-object response — `/user`, a commit's detail, a manifest file.
         Never paginated; see `_get_all_pages` for list-shaped endpoints."""
-        body, _ = self._get_json_with_response(token, path, params)
+        body, _ = self._fetch_page(token, f"https://api.github.com{path}", params)
         return body
-
-    def _get_json_with_response(self, token: str, path: str, params: dict | None = None):
-        """Like `_get_json`, but also returns the raw response — for the one
-        caller (`get_earliest_commit_sha`) that needs a response header
-        (`Link: rel="last"`) `_get_json` would otherwise discard."""
-        return self._fetch_page(token, f"https://api.github.com{path}", params)
 
     def _get_all_pages(self, token: str, path: str, params: dict | None = None, max_pages: int = 100) -> list:
         """Follows the response's `Link: rel="next"` header until exhausted, so a
@@ -371,10 +322,9 @@ class RealGitHubClient(GitHubClient):
         return results
 
     def _fetch_page(self, token: str, url: str, params: dict | None, max_retries: int = 5):
-        """One page: handles auth errors, rate-limit backoff (both secondary/
-        abuse-detection and a primary limit fully exhausted), and ETag caching.
-        Returns `(body, response)` — callers needing the next-page Link header
-        (`_get_all_pages`) read it off `response.links`."""
+        """One page: handles auth errors, secondary-rate-limit backoff, and ETag
+        caching. Returns `(body, response)` — callers needing the next-page Link
+        header (`_get_all_pages`) read it off `response.links`."""
         cache_key = f"{url}?{params}"
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         cached_etag, cached_body = self._etag_cache.get(cache_key, (None, None))
@@ -388,7 +338,7 @@ class RealGitHubClient(GitHubClient):
                 return cached_body, response
             if response.status_code == 401:
                 raise GitHubAuthError("GitHub token is invalid or has been revoked")
-            if response.status_code == 403 and _is_rate_limited(response) and attempt < max_retries:
+            if response.status_code == 403 and _is_secondary_rate_limit(response) and attempt < max_retries:
                 time.sleep(_backoff_seconds(response, attempt))
                 attempt += 1
                 continue
@@ -410,15 +360,8 @@ def _append_unique(commits: list[CommitRecord], seen: set[tuple[str, str]], comm
     commits.append(commit)
 
 
-def _is_rate_limited(response: httpx.Response) -> bool:
-    """A 403 GitHub returns for either kind of rate limit: secondary/abuse-detection
-    (flagged by a Retry-After header, or by the message text when it isn't present)
-    or a primary limit fully exhausted (X-RateLimit-Remaining: 0) — the Search API's
-    much stricter 30/min quota, used by the Provenance Check's (round 11, ADR-0012)
-    commit_exists_elsewhere, hits the latter in practice under normal use, not abuse."""
+def _is_secondary_rate_limit(response: httpx.Response) -> bool:
     if response.headers.get("Retry-After"):
-        return True
-    if response.headers.get("X-RateLimit-Remaining") == "0":
         return True
     body_text = response.text.lower()
     return "secondary rate limit" in body_text or "abuse detection" in body_text
@@ -428,13 +371,6 @@ def _backoff_seconds(response: httpx.Response, attempt: int) -> float:
     retry_after = response.headers.get("Retry-After")
     if retry_after:
         return float(retry_after)
-    # A primary limit's reset time is a fixed point in time (epoch seconds), not
-    # attempt-dependent — wait exactly until then rather than guessing with
-    # exponential backoff, which could either undershoot (retry still rejected)
-    # or needlessly overshoot a already-short Search API window.
-    reset_at = response.headers.get("X-RateLimit-Reset")
-    if reset_at:
-        return max(float(reset_at) - time.time(), 1.0)
     return min(2**attempt, 60)
 
 
@@ -463,8 +399,6 @@ class FakeGitHubClient(GitHubClient):
     pr_commits: dict[tuple[str, int], list[CommitRecord]] = field(default_factory=dict)
     pr_comments: dict[str, list[PrCommentRecord]] = field(default_factory=dict)
     manifest_files: dict[str, dict[str, str]] = field(default_factory=dict)
-    earliest_commit_shas: dict[str, str] = field(default_factory=dict)  # repo full_name -> sha; absent = empty repo
-    shas_found_elsewhere: dict[str, bool] = field(default_factory=dict)  # sha -> Provenance Check result
     revoked_tokens: set[str] = field(default_factory=set)
 
     def exchange_code_for_token(self, code: str) -> str:
@@ -500,14 +434,6 @@ class FakeGitHubClient(GitHubClient):
     def get_manifest_files(self, token: str, repo: Repo) -> dict[str, str]:
         self._check_token(token)
         return self.manifest_files.get(repo.full_name, {})
-
-    def get_earliest_commit_sha(self, token: str, repo: Repo) -> str | None:
-        self._check_token(token)
-        return self.earliest_commit_shas.get(repo.full_name)
-
-    def commit_exists_elsewhere(self, token: str, sha: str, exclude_owner: str) -> bool:
-        self._check_token(token)
-        return self.shas_found_elsewhere.get(sha, False)
 
     def _check_token(self, token: str) -> None:
         if token in self.revoked_tokens:

@@ -551,11 +551,7 @@ def test_search_and_semantics_requires_every_selected_skill(client, fake_github)
     matches_by_skill = {m["skill"]: m for m in match["matches"]}
     assert matches_by_skill["FastAPI"]["evidence_type"] == "verified"
     assert matches_by_skill["Django"]["evidence_type"] == "declared_only"
-    # declared_only has zero qualifying (Depth/Span) evidence, so the Span
-    # Ceiling (ADR-0013) zeroes its score — evidence_type, not confidence_score,
-    # is what distinguishes it from "none" now.
-    assert matches_by_skill["Django"]["confidence_score"] == 0.0
-    assert matches_by_skill["FastAPI"]["confidence_score"] > 0
+    assert 0 < matches_by_skill["Django"]["confidence_score"] < matches_by_skill["FastAPI"]["confidence_score"]
 
 
 def test_search_average_score_only_covers_selected_skills(client, fake_github):
@@ -610,9 +606,7 @@ def test_verify_produces_declared_only_for_a_manifest_dependency_never_touched(c
 
     card = client.get(f"/evidence-card/{candidate_id}").json()["cards"][0]
     assert card["evidence_type"] == "declared_only"
-    # Zero qualifying (Depth/Span) evidence behind a declared_only card means
-    # the Span Ceiling (ADR-0013) zeroes its Presence-only score.
-    assert card["confidence_score"] == 0.0
+    assert 0 < card["confidence_score"] < 0.3
     assert card["source_commits"] == []
 
 
@@ -677,33 +671,3 @@ def test_search_is_rate_limited_per_ip(client, fake_github):
 
     throttled = client.get("/search?skill=FastAPI")
     assert throttled.status_code == 429
-
-
-def test_verify_excludes_flagged_owned_repo_commits_but_keeps_its_declared_presence(client, fake_github):
-    """Provenance Check (round 11, ADR-0012), end to end. OWNED_REPO's earliest
-    commit is fabricated to match one found elsewhere on GitHub, so its
-    commits ('c1', the only FastAPI-qualifying commit there) and its PR
-    comment must drop out of FastAPI's evidence entirely, leaving only the
-    external repo's qualifying commit ('e1') — while Django's declared_only
-    score, driven purely by OWNED_REPO's manifest, is completely unaffected."""
-    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
-    fake_github.earliest_commit_shas[OWNED_REPO.full_name] = "owned-root-sha"
-    fake_github.shas_found_elsewhere["owned-root-sha"] = True
-    candidate_id = _connect(client)["candidate_id"]
-
-    verify_response = client.post("/verify", json={"skills": ["FastAPI", "Django"], "searchable": True})
-    assert verify_response.status_code == 202
-
-    cards = {c["skill"]: c for c in client.get(f"/evidence-card/{candidate_id}").json()["cards"]}
-
-    fastapi_card = cards["FastAPI"]
-    assert fastapi_card["evidence_type"] == "verified"
-    refs = {(r["kind"], r["ref"]) for r in fastapi_card["source_commits"]}
-    assert refs == {("commit", "e1")}  # c1 and the OWNED_REPO PR comment are gone
-
-    django_card = cards["Django"]
-    assert django_card["evidence_type"] == "declared_only"
-    # Presence-only, untouched by the Provenance flag — but the Span Ceiling
-    # (ADR-0013) zeroes any declared_only score regardless, since it has zero
-    # qualifying (Depth/Span) evidence.
-    assert django_card["confidence_score"] == 0.0

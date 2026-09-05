@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 from sqlalchemy.orm import Session
 
-from skillproof import provenance, scoring, security, sightings, taxonomy
+from skillproof import scoring, security, sightings, taxonomy
 from skillproof.github_client import GitHubAuthError, GitHubClient
 from skillproof.ingestion import ingest_evidence
 from skillproof.models import Candidate, EvidenceCard
@@ -71,12 +71,6 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
             evidence_bundle = ingest_evidence(
                 github_client, token, candidate.github_login, on_repo_scanned=on_repo_scanned
             )
-            # Provenance Check (round 11, ADR-0012): silently excludes any owned
-            # repo's evidence whose history was imported rather than genuinely
-            # authored, before that evidence ever reaches scoring. Kept inside
-            # this same try block since it calls the same GitHubClient and can
-            # fail the same ways (revoked token, network error) ingestion can.
-            evidence_bundle = provenance.exclude_disqualified_evidence(db, github_client, token, evidence_bundle)
         except GitHubAuthError:
             candidate.needs_reconnect = True
             for skill in skills:

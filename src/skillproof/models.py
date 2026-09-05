@@ -97,25 +97,6 @@ class Sighting(Base):
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
-class RepoProvenanceFlag(Base):
-    """A permanent record that one repo's earliest commit was found to already
-    exist in another public repo not owned by this repo's owner (round 11,
-    ADR-0012) — evidence its history was imported rather than genuinely
-    authored. Every EvidenceItem from a flagged repo is excluded from Volume,
-    Depth, and Span for whichever Candidate owns it; Presence is unaffected.
-    Keyed by repo alone (not per-candidate): whether a repo's history was
-    imported is a fact about that repo, independent of who's verifying.
-    A clean result (no match found) is deliberately never recorded here — the
-    absence of a match today doesn't guarantee one tomorrow, so a clean repo
-    is re-checked on every `/verify`, never cached as clear."""
-
-    __tablename__ = "repo_provenance_flags"
-
-    repo: Mapped[str] = mapped_column(String, primary_key=True)
-    matched_sha: Mapped[str] = mapped_column(String)
-    flagged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-
-
 class SightingDecision(Base):
     """A terminal outcome (published / rejected_duplicate / abstained) for one
     (ecosystem, package_name) pair `taxonomy_growth.publish_new_skill_tags` has
