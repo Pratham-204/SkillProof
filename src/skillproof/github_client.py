@@ -204,11 +204,6 @@ class GitHubClient(ABC):
         """Commits belonging to one specific (merged) PR, for external-repo Volume scoping."""
         ...
 
-    def close(self) -> None:
-        """Release any held resources (network client, thread pools). No-op by
-        default; `RealGitHubClient` overrides this to shut down its executors
-        and HTTP client once a scan finishes."""
-
 
 class RealGitHubClient(GitHubClient):
     """Talks to api.github.com over HTTPS, read-only, public data only."""
@@ -230,8 +225,11 @@ class RealGitHubClient(GitHubClient):
         self._etag_lock = threading.Lock()
         self._client = httpx.Client(transport=transport, timeout=15)
 
-        # Shared across a whole scan (github-scan-performance tickets 01/03), not
-        # recreated per call. Two separate pools rather than one: `_repo_pool`'s
+        # Shared for this client's whole lifetime (github-scan-performance
+        # tickets 01/03), not recreated per call — and note `deps.get_github_client`
+        # makes `RealGitHubClient` a process-wide `@lru_cache` singleton, so
+        # that lifetime is the whole app process, not just one scan. Two
+        # separate pools rather than one: `_repo_pool`'s
         # workers call back into methods (`_fetch_owned_commits` etc.) that
         # themselves submit to `_item_pool` and wait on the result — submitting
         # that inner work to the *same* bounded pool the outer task is running in
@@ -385,11 +383,6 @@ class RealGitHubClient(GitHubClient):
             return []
         futures = [self._repo_pool.submit(fn, item) for item in items]
         return [future.result() for future in futures]
-
-    def close(self) -> None:
-        self._item_pool.shutdown(wait=False)
-        self._repo_pool.shutdown(wait=False)
-        self._client.close()
 
     def _get_json(self, token: str, path: str, params: dict | None = None):
         """One single-object response — `/user`, a commit's detail, a manifest file.

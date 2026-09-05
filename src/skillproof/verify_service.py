@@ -134,7 +134,15 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
             db.commit()
             progress_bus.publish(candidate_id, ProgressEvent(kind="reveal", detail=skill))
     finally:
-        github_client.close()
+        # github_client is NOT closed here: `deps.get_github_client` is
+        # `@lru_cache`-decorated (a process-wide singleton reused by every
+        # request, not created fresh per call), so closing its HTTP client
+        # after one run would permanently break it for every later request
+        # sharing the same instance — including OAuth token exchange in
+        # /auth/github/callback. This was a real production bug: the first
+        # completed verification run closed the singleton's httpx.Client,
+        # and every GitHub call after that (including reconnect) failed with
+        # "Cannot send a request, as the client has been closed."
         progress_bus.publish(candidate_id, ProgressEvent(kind="done", detail=""))
         db.close()
 
