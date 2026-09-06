@@ -7,6 +7,3 @@ src/skillproof/data/skills_embeddings.npz
 .pytest_cache/
 .mypy_cache/
 .env
-# Written by CI's deploy job so /health can report the running commit — it
-# only ever exists inside a deploy run, never in the repo.
-src/skillproof/_build_sha.txt

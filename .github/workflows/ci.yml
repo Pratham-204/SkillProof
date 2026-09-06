@@ -78,10 +78,12 @@ jobs:
         run: npm install -g @railway/cli
 
       - name: Stamp the build with this commit
-        # Lands in the source `railway up` uploads, so the Dockerfile's
-        # existing `COPY src/ ./src/` bakes it into the image and /health can
-        # report which commit is actually running. Gitignored — it exists
-        # only inside a deploy run, never in the repo.
+        # Overwrites the committed placeholder ("unknown") so the Dockerfile's
+        # existing `COPY src/ ./src/` bakes this commit into the image and
+        # /health can report which commit is actually running. The file is
+        # tracked, not gitignored, precisely because `railway up` honors
+        # .gitignore when packaging its upload — an ignored stamp never
+        # reaches the build it exists to identify.
         run: echo "${GITHUB_SHA}" > src/skillproof/_build_sha.txt
 
       - name: Deploy
