@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from skillproof import taxonomy, verify_service
+from skillproof.github_client import CommitRecord, GitHubUser, Repo
 from skillproof.ingestion import EvidenceBundle, EvidenceItem
 from skillproof.models import Candidate, CandidateSession, EvidenceCard, Sighting
 from tests.fixtures.github_fixtures import (
@@ -656,6 +657,46 @@ def test_reverify_does_not_duplicate_an_already_recorded_sighting(client, fake_g
         assert len(sightings) == 1
     finally:
         db.close()
+
+
+def test_verify_redacts_repo_and_url_for_evidence_from_a_private_repo(client, fake_github):
+    """Private-repo evidence must count toward the score like any other
+    evidence, but the public Evidence Card is reachable by anyone with the
+    URL — it must never become a way to discover the name of a stranger's
+    private repo, so source_commits redacts repo/url for a private item
+    while still surfacing that private evidence exists at all (private=True)."""
+    login, code = "octodev", "test-code"
+    private_repo = Repo(owner=login, name="internal-app", fork=False, private=True)
+
+    fake_github.tokens_by_code[code] = f"token-for-{code}"
+    fake_github.users_by_code[code] = GitHubUser(id=42, login=login)
+    fake_github.owned_repos[login] = [private_repo]
+    fake_github.merged_prs[login] = []
+    fake_github.manifest_files[private_repo.full_name] = {}
+    fake_github.commits[private_repo.full_name] = [
+        CommitRecord(
+            repo=private_repo,
+            sha="p1",
+            message=QUALIFYING_COMMIT_MESSAGE,
+            date=datetime(2024, 6, 1, tzinfo=timezone.utc),
+            files=["skillproof/verify.py"],
+            diff_text=QUALIFYING_DIFF_TEXT,
+            url=f"https://github.com/{private_repo.full_name}/commit/p1",
+        )
+    ]
+
+    candidate_id = _connect(client, login=login, github_user_id=42, code=code)["candidate_id"]
+    client.post("/verify", json={"skills": ["FastAPI"]})
+
+    card = client.get(f"/evidence-card/{candidate_id}").json()["cards"][0]
+    assert card["evidence_type"] == "verified"
+    assert card["confidence_score"] > 0
+    assert card["source_commits"] != []
+    for ref in card["source_commits"]:
+        assert ref["private"] is True
+        assert ref["repo"] == "a private repository"
+        assert ref["url"] == ""
+        assert ref["ref"] == "p1"  # the sha alone, with no repo/url, identifies nothing
 
 
 def test_search_dedupes_a_candidate_forked_across_taxonomy_versions(client, fake_github, monkeypatch):

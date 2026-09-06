@@ -85,14 +85,20 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
         <div className="mt-3 flex flex-col gap-3 border-t border-neutral-200 pt-3 dark:border-neutral-800">
           {card.source_commits.length > 0 && (
             <ul className="flex flex-col gap-1">
-              {card.source_commits.map((ref) => (
-                <li key={`${ref.kind}-${ref.ref}`} className="font-mono text-xs">
-                  <a href={ref.url} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:opacity-70">
-                    {ref.kind === 'commit' ? 'commit' : 'PR comment'} {ref.ref.slice(0, 7)}
-                  </a>
-                  <span className="ml-2 text-neutral-400">{ref.repo}</span>
-                </li>
-              ))}
+              {card.source_commits.map((ref) =>
+                ref.private ? (
+                  <li key={`${ref.kind}-${ref.ref}`} className="text-neutral-500">
+                    {ref.kind === 'commit' ? 'Commit' : 'PR comment'} in {ref.repo}
+                  </li>
+                ) : (
+                  <li key={`${ref.kind}-${ref.ref}`} className="font-mono text-xs">
+                    <a href={ref.url} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:opacity-70">
+                      {ref.kind === 'commit' ? 'commit' : 'PR comment'} {ref.ref.slice(0, 7)}
+                    </a>
+                    <span className="ml-2 text-neutral-400">{ref.repo}</span>
+                  </li>
+                ),
+              )}
             </ul>
           )}
 

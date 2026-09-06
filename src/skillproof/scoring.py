@@ -31,6 +31,12 @@ class QualifyingEvidence:
     ref: str
     url: str
     similarity: float
+    # Private repos count toward the score like any other evidence, but a
+    # public Evidence Card must not become a way to discover the name (or
+    # contents) of a stranger's private repo — repo/url are already redacted
+    # to a generic placeholder by the time this reaches here (score_skill
+    # below), so this is only a display flag, not a second redaction point.
+    private: bool = False
 
 
 @dataclass(frozen=True)
@@ -114,7 +120,14 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
     # source_commits mirrors top_n, not the full qualifying set: it's meant to
     # show exactly what drove the score, not the wider set that only feeds Span.
     source_commits = [
-        QualifyingEvidence(kind=item.kind, repo=item.repo, ref=item.ref, url=item.url, similarity=round(raw_sim, 4))
+        QualifyingEvidence(
+            kind=item.kind,
+            repo=item.repo if not item.private else "a private repository",
+            ref=item.ref,
+            url=item.url if not item.private else "",
+            similarity=round(raw_sim, 4),
+            private=item.private,
+        )
         for item, raw_sim, _ in top_n
     ]
 

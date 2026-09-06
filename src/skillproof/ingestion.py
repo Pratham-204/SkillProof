@@ -20,6 +20,10 @@ class EvidenceItem:
     date: datetime
     files: tuple[str, ...] = ()  # changed file paths; empty for pr_comment items
     diff_text: str = ""  # commit diff content, matched against Volume/Presence content markers; empty for pr_comment
+    # From the source Repo (private-repos support) — scoring.py redacts repo/url
+    # for a private item before it ever reaches a public Evidence Card, so this
+    # counts toward the score without exposing which private repo backed it.
+    private: bool = False
 
     def matches(self, pattern: DetectionPattern) -> bool:
         """A commit matches via its changed files or its own diff content — never
@@ -100,7 +104,7 @@ def ingest_evidence(
     own per-manifest-filename pool) — nesting into that one instead would risk
     every one of its workers blocking on a queued task none of them is free to run.
     """
-    owned_repos = client.list_owned_public_repos(token, login)
+    owned_repos = client.list_owned_repos(token, login)
     merged_prs = client.list_merged_prs(token, login)
     external_repos = _dedupe_repos(pr.repo for pr in merged_prs)
     all_repos = owned_repos + external_repos
@@ -160,6 +164,7 @@ def _append_commit_evidence(
             date=commit.date,
             files=tuple(commit.files),
             diff_text=commit.diff_text,
+            private=commit.repo.private,
         )
     )
 
@@ -172,4 +177,5 @@ def _evidence_from_comment(repo: Repo, comment: PrCommentRecord) -> EvidenceItem
         url=comment.url,
         text=comment.body,
         date=comment.date,
+        private=repo.private,
     )

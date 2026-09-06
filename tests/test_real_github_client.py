@@ -44,26 +44,68 @@ class _ConcurrencyTracker:
             self._current -= 1
 
 
-def test_list_owned_public_repos_follows_link_header_pagination():
+def test_list_owned_repos_follows_link_header_pagination():
     """A plain-array endpoint (repos) spanning two pages must not be truncated
     at page 1 — this is the exact silent-truncation bug candidate 2 flagged."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.params.get("page") == "2":
-            return httpx.Response(200, json=[{"owner": {"login": "octodev"}, "name": "repo-b", "fork": False}])
+            return httpx.Response(
+                200, json=[{"owner": {"login": "octodev"}, "name": "repo-b", "fork": False, "private": False}]
+            )
         return httpx.Response(
             200,
-            json=[{"owner": {"login": "octodev"}, "name": "repo-a", "fork": False}],
-            headers={
-                "Link": '<https://api.github.com/users/octodev/repos?type=owner&per_page=100&page=2>; rel="next"'
-            },
+            json=[{"owner": {"login": "octodev"}, "name": "repo-a", "fork": False, "private": False}],
+            headers={"Link": '<https://api.github.com/user/repos?affiliation=owner&per_page=100&page=2>; rel="next"'},
         )
 
     client = _client(handler)
 
-    repos = client.list_owned_public_repos("token", "octodev")
+    repos = client.list_owned_repos("token", "octodev")
 
     assert {r.name for r in repos} == {"repo-a", "repo-b"}
+
+
+def test_list_owned_repos_includes_private_repos_when_the_token_has_repo_scope():
+    """/user/repos (authenticated) sees whatever the token's own scope allows —
+    unlike /users/{login}/repos, which is a public-profile listing and can
+    never return a private repo for any token."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/user/repos"
+        return httpx.Response(
+            200,
+            json=[
+                {"owner": {"login": "octodev"}, "name": "public-app", "fork": False, "private": False},
+                {"owner": {"login": "octodev"}, "name": "internal-app", "fork": False, "private": True},
+            ],
+        )
+
+    client = _client(handler)
+
+    repos = client.list_owned_repos("token", "octodev")
+
+    assert {(r.name, r.private) for r in repos} == {("public-app", False), ("internal-app", True)}
+
+
+def test_list_owned_repos_falls_back_to_public_only_without_repo_scope():
+    """A Candidate who connected before private-repo support existed carries a
+    token issued under the old, narrower scope. Real production concern: that
+    token must keep working exactly as it did before, not break /verify."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/repos":
+            return httpx.Response(403, json={"message": "Resource not accessible by integration"})
+        assert request.url.path == "/users/octodev/repos"
+        return httpx.Response(
+            200, json=[{"owner": {"login": "octodev"}, "name": "public-app", "fork": False}]
+        )
+
+    client = _client(handler)
+
+    repos = client.list_owned_repos("token-with-old-scope", "octodev")
+
+    assert [(r.name, r.private) for r in repos] == [("public-app", False)]
 
 
 def test_list_merged_prs_follows_pagination_on_the_search_endpoint():
@@ -201,8 +243,10 @@ def test_list_qualifying_commits_treats_409_empty_repo_as_zero_commits():
     treated as zero commits for that repo, not abort the whole scan."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/users/octodev/repos":
-            return httpx.Response(200, json=[{"owner": {"login": "octodev"}, "name": "empty-repo", "fork": False}])
+        if request.url.path == "/user/repos":
+            return httpx.Response(
+                200, json=[{"owner": {"login": "octodev"}, "name": "empty-repo", "fork": False, "private": False}]
+            )
         if request.url.path == "/search/issues":
             return httpx.Response(200, json={"items": []})
         if request.url.path == "/repos/octodev/empty-repo/commits":
@@ -267,8 +311,10 @@ def test_commit_detail_fetch_runs_concurrently():
     tracker = _ConcurrencyTracker()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/users/octodev/repos":
-            return httpx.Response(200, json=[{"owner": {"login": "octodev"}, "name": "repo-a", "fork": False}])
+        if request.url.path == "/user/repos":
+            return httpx.Response(
+                200, json=[{"owner": {"login": "octodev"}, "name": "repo-a", "fork": False, "private": False}]
+            )
         if request.url.path == "/search/issues":
             return httpx.Response(200, json={"items": []})
         if request.url.path == "/repos/octodev/repo-a/commits":
@@ -302,12 +348,12 @@ def test_repos_are_processed_concurrently():
     tracker = _ConcurrencyTracker()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/users/octodev/repos":
+        if request.url.path == "/user/repos":
             return httpx.Response(
                 200,
                 json=[
-                    {"owner": {"login": "octodev"}, "name": "repo-a", "fork": False},
-                    {"owner": {"login": "octodev"}, "name": "repo-b", "fork": False},
+                    {"owner": {"login": "octodev"}, "name": "repo-a", "fork": False, "private": False},
+                    {"owner": {"login": "octodev"}, "name": "repo-b", "fork": False, "private": False},
                 ],
             )
         if request.url.path == "/search/issues":

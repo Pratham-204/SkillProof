@@ -47,7 +47,7 @@ class _SlowManifestClient(GitHubClient):
     def get_authenticated_user(self, token):  # pragma: no cover - unused by ingest_evidence
         raise NotImplementedError
 
-    def list_owned_public_repos(self, token, login):
+    def list_owned_repos(self, token, login):
         return self.repos
 
     def list_merged_prs(self, token, login):

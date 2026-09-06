@@ -37,6 +37,7 @@ class EvidenceRefOut(BaseModel):
     ref: str
     url: str
     similarity: float
+    private: bool = False
 
 
 class EvidenceCardOut(BaseModel):

@@ -31,7 +31,14 @@ class Settings(BaseSettings):
     github_client_id: str = "dev-client-id"
     github_client_secret: str = "dev-client-secret"
     github_oauth_redirect_uri: str = "http://localhost:8000/auth/github/callback"
-    github_oauth_scope: str = "read:user"
+    # `repo` (not just `read:user`) so a Candidate's private repos are visible
+    # to list_owned_repos too — GitHub's classic OAuth scopes have no
+    # read-only-private-repos option; `repo` is the only scope that reads
+    # private repo content at all, and it nominally grants write access this
+    # app never exercises. A Candidate who authorized under the old, narrower
+    # scope keeps working (github_client.list_owned_repos falls back to
+    # public-only for them) until they reconnect.
+    github_oauth_scope: str = "read:user repo"
 
     # Fernet key for encrypting stored GitHub tokens at rest. Must be a valid
     # Fernet key (32 url-safe base64-encoded bytes). Left unset by default —

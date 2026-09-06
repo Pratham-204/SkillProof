@@ -60,6 +60,12 @@ class Repo:
     owner: str
     name: str
     fork: bool = False
+    # Threaded through to EvidenceItem/QualifyingEvidence so a public Evidence
+    # Card can redact which private repo backed a piece of evidence instead of
+    # exposing it to anyone with the card's URL. Defaults False so every
+    # existing external/fixture Repo — which was always public before private
+    # repos existed at all — is unaffected.
+    private: bool = False
 
     @property
     def full_name(self) -> str:
@@ -113,7 +119,11 @@ class GitHubClient(ABC):
     def get_authenticated_user(self, token: str) -> GitHubUser: ...
 
     @abstractmethod
-    def list_owned_public_repos(self, token: str, login: str) -> list[Repo]: ...
+    def list_owned_repos(self, token: str, login: str) -> list[Repo]:
+        """The Candidate's owned, non-fork repos — private ones included when the
+        token's OAuth scope allows it, falling back to public-only otherwise
+        (`RealGitHubClient`'s own docstring covers exactly how)."""
+        ...
 
     @abstractmethod
     def list_merged_prs(self, token: str, login: str) -> list[MergedPullRequest]:
@@ -151,7 +161,7 @@ class GitHubClient(ABC):
         announced once, on first encounter. Announcing is guarded by a lock since
         `_map_repos` may call this from more than one thread concurrently.
         """
-        owned_repos = self.list_owned_public_repos(token, login)
+        owned_repos = self.list_owned_repos(token, login)
         merged_prs = self.list_merged_prs(token, login)
 
         commits: list[CommitRecord] = []
@@ -269,9 +279,33 @@ class RealGitHubClient(GitHubClient):
         data = self._get_json(token, "/user")
         return GitHubUser(id=data["id"], login=data["login"])
 
-    def list_owned_public_repos(self, token: str, login: str) -> list[Repo]:
-        data = self._get_all_pages(token, f"/users/{login}/repos", params={"type": "owner", "per_page": 100})
-        return [Repo(owner=r["owner"]["login"], name=r["name"], fork=r["fork"]) for r in data if not r["fork"]]
+    def list_owned_repos(self, token: str, login: str) -> list[Repo]:
+        """`/user/repos` (authenticated) sees exactly what the token's OAuth scope
+        allows — private repos too, once that scope includes `repo` (settings.
+        github_oauth_scope). `visibility`/`affiliation` and the old endpoint's
+        `type` param are mutually exclusive on GitHub's side, so this doesn't
+        reuse that param name even though it means the same thing.
+
+        A Candidate who connected before private-repo support existed carries a
+        token issued under the old, narrower scope and hasn't necessarily
+        reconnected — GitHub responds to that gap with a 404/403 on this
+        endpoint rather than silently omitting private repos, so this falls
+        back to the original public-only listing (`/users/{login}/repos`,
+        which works for any token regardless of scope) rather than failing
+        the whole scan over a capability this token simply doesn't have.
+        """
+        try:
+            data = self._get_all_pages(
+                token, "/user/repos", params={"visibility": "all", "affiliation": "owner", "per_page": 100}
+            )
+            return [
+                Repo(owner=r["owner"]["login"], name=r["name"], fork=r["fork"], private=r["private"])
+                for r in data
+                if not r["fork"]
+            ]
+        except httpx.HTTPStatusError:
+            data = self._get_all_pages(token, f"/users/{login}/repos", params={"type": "owner", "per_page": 100})
+            return [Repo(owner=r["owner"]["login"], name=r["name"], fork=r["fork"]) for r in data if not r["fork"]]
 
     def list_merged_prs(self, token: str, login: str) -> list[MergedPullRequest]:
         data = self._get_all_pages(
@@ -519,7 +553,7 @@ class FakeGitHubClient(GitHubClient):
                 return user
         return GitHubUser(id=hash(token) % 1_000_000, login=f"user-{token[:8]}")
 
-    def list_owned_public_repos(self, token: str, login: str) -> list[Repo]:
+    def list_owned_repos(self, token: str, login: str) -> list[Repo]:
         self._check_token(token)
         return self.owned_repos.get(login, [])
 

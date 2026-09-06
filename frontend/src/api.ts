@@ -22,6 +22,11 @@ export interface EvidenceRef {
   ref: string
   url: string
   similarity: number
+  // true for evidence from a private repo — the backend has already redacted
+  // `repo`/`url` to a generic placeholder in that case, so nothing else here
+  // needs to check this before rendering `repo`/`url` directly; it exists so
+  // the UI can skip the (now-empty) link instead of rendering a broken one.
+  private: boolean
 }
 
 // "verified" (real commits touched it), "declared_only" (manifest lists it,
