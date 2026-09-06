@@ -77,6 +77,13 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
+      - name: Stamp the build with this commit
+        # Lands in the source `railway up` uploads, so the Dockerfile's
+        # existing `COPY src/ ./src/` bakes it into the image and /health can
+        # report which commit is actually running. Gitignored — it exists
+        # only inside a deploy run, never in the repo.
+        run: echo "${GITHUB_SHA}" > src/skillproof/_build_sha.txt
+
       - name: Deploy
         # --service is required: the project also has a Postgres addon
         # service, so `railway up` alone is ambiguous about which one to
@@ -84,3 +91,27 @@ jobs:
         run: railway up --service SkillProof
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+      - name: Verify the deploy actually rolled out
+        # `railway up` returns once its upload is accepted, so the step above
+        # going green proves nothing about what production is serving: a
+        # Railway build that fails, is queued, or is blocked (e.g. exhausted
+        # trial credits) leaves the previous container running with every CI
+        # check still passing. That really happened — 3103c70 and 4601cab both
+        # reported a successful deploy while production kept serving 5f7c17f,
+        # so an already-fixed crash stayed live in production. Polling /health
+        # for this exact commit is what turns that silent no-op into a red
+        # pipeline.
+        run: |
+          for i in $(seq 1 40); do
+            live=$(curl -fsS --max-time 10 https://skillproof.up.railway.app/health \
+              | python3 -c "import sys, json; print(json.load(sys.stdin).get('git_sha', ''))" 2>/dev/null || true)
+            if [ "$live" = "$GITHUB_SHA" ]; then
+              echo "Production is serving $GITHUB_SHA"
+              exit 0
+            fi
+            echo "waiting for rollout — production is serving: ${live:-unreachable}"
+            sleep 15
+          done
+          echo "::error::Production never served $GITHUB_SHA. Check the Railway build logs and the project's plan/credits."
+          exit 1

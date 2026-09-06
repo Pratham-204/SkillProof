@@ -686,3 +686,15 @@ def test_search_is_rate_limited_per_ip(client, fake_github):
 
     throttled = client.get("/search?skill=FastAPI")
     assert throttled.status_code == 429
+
+
+def test_health_reports_the_deployed_commit(client):
+    """CI's deploy verification polls this to prove production is actually
+    serving the commit it just pushed — `railway up` returning success only
+    means the upload was accepted, not that anything rolled out. "unknown" is
+    the correct answer here: the SHA file is written into the image at deploy
+    time and deliberately absent in dev and tests."""
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "git_sha": "unknown"}

@@ -8,6 +8,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from skillproof import version
 from skillproof.db import init_db
 from skillproof.limiter import limiter
 from skillproof.routers import auth, evidence_card, explain, search, taxonomy, verify
@@ -45,6 +46,14 @@ def create_app() -> FastAPI:
     app.include_router(evidence_card.router)
     app.include_router(explain.router)
     app.include_router(search.router)
+
+    @app.get("/health", include_in_schema=False)
+    def health() -> dict[str, str]:
+        """Reports which commit this container was actually built from, so a
+        deploy can be verified instead of assumed (see `version.deployed_sha`).
+        Registered before the SPA catch-all below, which would otherwise
+        swallow this path and hand back index.html."""
+        return {"status": "ok", "git_sha": version.deployed_sha()}
 
     if FRONTEND_DIST.is_dir():
         app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="frontend-assets")
