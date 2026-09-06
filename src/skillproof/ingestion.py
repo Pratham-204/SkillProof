@@ -69,6 +69,7 @@ def ingest_evidence(
     token: str,
     login: str,
     on_repo_scanned: Callable[[str], None] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> EvidenceBundle:
     """Pull commit diffs + PR review comments for a Candidate and drop low-signal items.
 
@@ -82,6 +83,15 @@ def ingest_evidence(
     progress during commit-fetching (the dominant cost here) for the verify SSE
     stream (ticket 03) — it doesn't also cover the separate manifest/PR-comment
     loops below.
+
+    `on_phase`, if given, is called once at the start of each of this function's
+    three real phases ("Checking dependency manifests", "Fetching commit history",
+    "Reading PR review comments") — real, already-started work, not a fabricated
+    tick. Exists because manifest-checking and PR-comment fetching produce no
+    per-repo progress of their own (unlike commit-fetching's `on_repo_scanned`),
+    so without this a slow run past the repo list looks indistinguishable from a
+    hung one on the scan screen — a real, observed failure mode (GitHub secondary
+    rate-limit backoff can stretch either phase to several silent minutes).
 
     The manifest and PR-review-comment loops below fan out across repos
     concurrently (github-scan-performance ticket 03) via a thread pool local to
@@ -98,12 +108,21 @@ def ingest_evidence(
 
     items: list[EvidenceItem] = []
 
+    if on_phase:
+        on_phase("Checking dependency manifests")
+
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="ingest-repo") as pool:
         manifest_futures = [(repo, pool.submit(client.get_manifest_files, token, repo)) for repo in all_repos]
         manifests = {repo.full_name: future.result() for repo, future in manifest_futures}
 
+        if on_phase:
+            on_phase("Fetching commit history")
+
         for commit in client.list_qualifying_commits(token, login, on_repo_scanned=on_repo_scanned):
             _append_commit_evidence(items, commit, protected_filenames)
+
+        if on_phase:
+            on_phase("Reading PR review comments")
 
         comment_futures = [(repo, pool.submit(client.list_pr_review_comments, token, repo, login)) for repo in all_repos]
         for repo, future in comment_futures:

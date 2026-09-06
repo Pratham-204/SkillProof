@@ -66,10 +66,13 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
         def on_repo_scanned(repo_full_name: str) -> None:
             progress_bus.publish(candidate_id, ProgressEvent(kind="scan", detail=repo_full_name))
 
+        def on_phase(description: str) -> None:
+            progress_bus.publish(candidate_id, ProgressEvent(kind="phase", detail=description))
+
         try:
             token = security.decrypt_token(candidate.github_token_encrypted)
             evidence_bundle = ingest_evidence(
-                github_client, token, candidate.github_login, on_repo_scanned=on_repo_scanned
+                github_client, token, candidate.github_login, on_repo_scanned=on_repo_scanned, on_phase=on_phase
             )
         except GitHubAuthError:
             candidate.needs_reconnect = True
@@ -97,6 +100,8 @@ def run_verification(session_factory, candidate_id: str, skills: list[str], gith
         candidate.needs_reconnect = False
         sightings.record_sightings(db, candidate_id, evidence_bundle.manifests)
         db.commit()
+
+        on_phase("Scoring claimed skills")
 
         for skill in skills:
             # Isolated per skill (ticket 01): a batched embeddings call failing

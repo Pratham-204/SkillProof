@@ -16,6 +16,11 @@ export default function ScanReveal() {
   const [phase, setPhase] = useState<Phase>('idle')
   const candidateId = candidate?.candidate_id ?? null
   const [scannedRepos, setScannedRepos] = useState<string[]>([])
+  // Real backend phase labels ("Reading PR review comments", etc.) — without
+  // this, the stretch between the repo list settling and the first reveal
+  // (manifest checks, PR-comment fetching, GitHub rate-limit backoff) has no
+  // visible progress at all and reads as hung even when it's just slow.
+  const [phaseLabel, setPhaseLabel] = useState<string | null>(null)
   const [cards, setCards] = useState<EvidenceCardType[]>([])
   // The skills this run is verifying, derived from the Candidate's own
   // Evidence Cards (status "processing" is stamped synchronously by
@@ -80,6 +85,10 @@ export default function ScanReveal() {
     source.addEventListener('scan', (e) => {
       const repo = (e as MessageEvent).data
       setScannedRepos((prev) => (prev.includes(repo) ? prev : [...prev, repo]))
+    })
+
+    source.addEventListener('phase', (e) => {
+      setPhaseLabel((e as MessageEvent).data)
     })
 
     source.addEventListener('reveal', (e) => {
@@ -147,6 +156,16 @@ export default function ScanReveal() {
       {phase === 'scanning' && (
         <div className="flex flex-col items-center gap-3">
           <h1 className="font-wordmark text-3xl">Scanning your repos…</h1>
+          {phaseLabel && (
+            <motion.p
+              key={phaseLabel}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="text-accent-ink font-mono text-xs uppercase tracking-wide"
+            >
+              {phaseLabel}
+            </motion.p>
+          )}
           <ul className="font-mono text-sm text-neutral-500">
             {scannedRepos.map((repo) => (
               <motion.li key={repo} initial={{ opacity: 0 }} animate={{ opacity: 1 }}>

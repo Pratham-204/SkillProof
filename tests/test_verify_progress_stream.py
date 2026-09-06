@@ -66,6 +66,18 @@ def test_run_verification_publishes_real_scan_then_reveal_events_in_order(client
     assert reveal_events == ["FastAPI", "Rust"]
     assert events[-1] == ("done", "")
 
+    # Real phase labels for the stretches with no per-repo progress of their
+    # own (manifest checks, PR-comment fetching, scoring) — without these the
+    # scan screen goes silent for however long those take, indistinguishable
+    # from actually being stuck.
+    phase_events = [detail for kind, detail in events if kind == "phase"]
+    assert phase_events == [
+        "Checking dependency manifests",
+        "Fetching commit history",
+        "Reading PR review comments",
+        "Scoring claimed skills",
+    ]
+
 
 def test_verify_stream_reconnect_after_already_finished_closes_immediately(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
