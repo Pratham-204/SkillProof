@@ -344,7 +344,7 @@ class RealGitHubClient(GitHubClient):
                 url=c["html_url"],
             )
             for c in data
-            if c.get("user", {}).get("login", "").lower() == author_login.lower()
+            if (c.get("user") or {}).get("login", "").lower() == author_login.lower()
         ]
 
     def get_manifest_files(self, token: str, repo: Repo) -> dict[str, str]:

@@ -15,8 +15,9 @@ import time
 import httpx
 import pytest
 
-from skillproof import github_client
+from skillproof import github_client, security, verify_service
 from skillproof.github_client import GitHubAuthError, RealGitHubClient, Repo
+from skillproof.models import Candidate, EvidenceCard
 
 
 def _client(handler) -> RealGitHubClient:
@@ -129,6 +130,42 @@ def test_list_pr_review_comments_follows_link_header_pagination():
     comments = client.list_pr_review_comments("token", Repo(owner="octodev", name="skillproof-lib"), "octodev")
 
     assert {c.comment_id for c in comments} == {1, 2}
+
+
+def test_list_pr_review_comments_skips_deleted_account_comments_without_crashing():
+    """GitHub returns "user": null (not a missing key) for a comment whose author's
+    account has since been deleted — a real, occasionally-hit case, not a fixture
+    artifact. The old `c.get("user", {})` default only covers a missing key; an
+    explicit `null` still returns `None`, and calling `.get("login", "")` on that
+    raised AttributeError, which killed this repo's whole comment fetch (running in
+    ingestion.py's thread pool) and failed every claimed skill's card for the run."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 1,
+                    "body": "from a deleted account",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "html_url": "https://github.com/octodev/skillproof-lib/pull/1#comment-1",
+                    "user": None,
+                },
+                {
+                    "id": 2,
+                    "body": "from the candidate",
+                    "created_at": "2024-01-02T00:00:00Z",
+                    "html_url": "https://github.com/octodev/skillproof-lib/pull/1#comment-2",
+                    "user": {"login": "octodev"},
+                },
+            ],
+        )
+
+    client = _client(handler)
+
+    comments = client.list_pr_review_comments("token", Repo(owner="octodev", name="skillproof-lib"), "octodev")
+
+    assert {c.comment_id for c in comments} == {2}
 
 
 def test_get_authenticated_user_raises_on_revoked_token():
@@ -319,3 +356,47 @@ def test_rate_limit_gate_is_held_by_the_backing_off_thread(monkeypatch):
     client.get_manifest_files("token", Repo(owner="octodev", name="skillproof-lib"))
 
     assert observed["gate_locked_during_sleep"] is True
+
+
+def test_client_survives_reuse_across_two_verification_runs(db_session_factory):
+    """Regression test for a real production bug (see git history: "Fix: don't
+    close the process-wide GitHubClient singleton after a scan"). `deps.get_github_client`
+    caches one `RealGitHubClient` for the whole app process (an `@lru_cache`
+    singleton), so `run_verification` must leave it usable for the next request —
+    not just the one it was called for. This test proves that directly by running
+    verification twice against the same client instance, the exact shape of the
+    incident (the first completed run permanently broke every later GitHub call,
+    including OAuth token exchange, by closing the shared `httpx.Client`)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/repos"):
+            return httpx.Response(200, json=[])
+        if request.url.path == "/search/issues":
+            return httpx.Response(200, json={"items": []})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = _client(handler)
+
+    db = db_session_factory()
+    candidate = Candidate(
+        github_user_id=1,
+        github_login="octodev",
+        github_token_encrypted=security.encrypt_token("real-token"),
+    )
+    db.add(candidate)
+    db.commit()
+    candidate_id = candidate.candidate_id
+    db.close()
+
+    for _ in range(2):
+        db = db_session_factory()
+        candidate = db.get(Candidate, candidate_id)
+        verify_service.start_verification(db, candidate, ["FastAPI"])
+        db.close()
+
+        verify_service.run_verification(db_session_factory, candidate_id, ["FastAPI"], client)
+
+        db = db_session_factory()
+        card = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill="FastAPI").one()
+        assert card.status == "complete"
+        db.close()
