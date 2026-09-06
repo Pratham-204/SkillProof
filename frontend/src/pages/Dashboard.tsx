@@ -123,7 +123,7 @@ export default function Dashboard() {
 
         <Link
           to="/claim"
-          className="mt-6 inline-block rounded-full bg-neutral-900 px-6 py-3 font-medium text-white dark:bg-white dark:text-neutral-900"
+          className="bg-accent text-on-accent mt-6 inline-block rounded-full px-6 py-3 font-medium transition hover:opacity-90"
         >
           Claim more skills
         </Link>

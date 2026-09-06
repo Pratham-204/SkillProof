@@ -18,6 +18,30 @@ export function evidenceCardClassName(isWeak: boolean): string {
   }`
 }
 
+// Compact pill label for evidence_type, shown next to the skill name — the
+// dashed/solid card treatment above signals "weak vs. not" at a glance across
+// a whole list, this pill names the exact state on a single card.
+export function evidenceBadgeLabel(evidenceType: EvidenceType): string {
+  switch (evidenceType) {
+    case 'verified':
+      return 'Verified'
+    case 'declared_only':
+      return 'Declared only'
+    case 'none':
+      return 'No evidence'
+  }
+}
+
+// Only "verified" gets the accent treatment — declared_only/none share the
+// same quiet neutral pill, since both are the isWeakEvidence(...) case above
+// and neither should read as more credible than the other.
+export function evidenceBadgeClassName(evidenceType: EvidenceType): string {
+  const base = 'shrink-0 rounded-full px-2.5 py-0.5 font-mono text-[0.65rem] uppercase tracking-wide'
+  return evidenceType === 'verified'
+    ? `${base} bg-accent-soft text-accent-ink`
+    : `${base} bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400`
+}
+
 // One switch over EvidenceType instead of one per caller. `qualifyingItemCount`
 // is only meaningful for "verified" (it's `source_commits.length`, the count of
 // Depth-qualifying items — see EvidenceCardTile's fuller wording); callers that

@@ -1,18 +1,48 @@
 @import "tailwindcss";
 
+/* Palette and type shared with the marketing landing page — see the
+   SkillProof artifact this was matched against. Accent/surface tokens are
+   defined once here and redefined under prefers-color-scheme so every
+   `bg-accent`/`text-on-accent`/etc. utility switches automatically; no
+   `dark:` variant is needed for them the way Tailwind's literal `neutral-*`
+   classes elsewhere in the app still require one. */
 @theme {
   --font-wordmark: "Fraunces", ui-serif, Georgia, serif;
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  --color-bg: #eff3ee;
+  --color-surface: #fbfcf9;
+  --color-surface-2: #e4e9e1;
+  --color-ink: #14211d;
+  --color-accent: #1f7a5c;
+  --color-accent-ink: #145c43;
+  --color-accent-soft: #dceee4;
+  --color-on-accent: #ffffff;
 }
 
 :root {
   color-scheme: light dark;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #0e1512;
+    --color-surface: #141f1a;
+    --color-surface-2: #1b2a23;
+    --color-ink: #e9f1ea;
+    --color-accent: #3fcb93;
+    --color-accent-ink: #7fe4b8;
+    --color-accent-soft: #163b2c;
+    --color-on-accent: #0e1512;
+  }
+}
+
 body {
   margin: 0;
   font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-ink);
 }
 
 /* Every animated/counting number (score count-up, commit counts, day spans)

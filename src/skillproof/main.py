@@ -17,6 +17,14 @@ from skillproof.routers import auth, evidence_card, explain, search, taxonomy, v
 # dev/tests, so serving it is skipped entirely rather than erroring.
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
+# The public marketing page — a static file (frontend/public/landing.html,
+# copied verbatim into dist/ by Vite) rather than a React route, so it can
+# ship without translating hand-authored CSS into Tailwind. It runs its own
+# /auth/github/me check and redirects an already-authenticated Candidate to
+# /dashboard client-side, so a returning Candidate still gets the fast-path
+# round 10 established — landing.html is what a stranger sees at "/".
+LANDING_PAGE = FRONTEND_DIST / "landing.html"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -40,6 +48,12 @@ def create_app() -> FastAPI:
 
     if FRONTEND_DIST.is_dir():
         app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="frontend-assets")
+
+        if LANDING_PAGE.is_file():
+
+            @app.get("/", include_in_schema=False)
+            def serve_landing() -> FileResponse:
+                return FileResponse(LANDING_PAGE)
 
         @app.get("/{full_path:path}", include_in_schema=False)
         def serve_frontend(full_path: str) -> FileResponse:

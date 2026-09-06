@@ -8,7 +8,17 @@ import { Link } from 'react-router-dom'
 export default function AppHeader() {
   return (
     <header className="mx-auto w-full max-w-5xl px-6 py-4">
-      <Link to="/" className="font-wordmark text-lg">
+      <Link to="/" className="font-wordmark flex items-center gap-2 text-lg">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <circle cx="10" cy="10" r="8.5" stroke="currentColor" strokeWidth="1.6" />
+          <path
+            d="M6.5 10.3l2.3 2.3 4.7-5"
+            stroke="var(--color-accent)"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
         SkillProof
       </Link>
     </header>

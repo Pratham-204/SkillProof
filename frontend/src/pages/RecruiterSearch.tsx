@@ -3,7 +3,13 @@ import { Link } from 'react-router-dom'
 import { RateLimitedError, listSkills, searchCandidates, type SearchResult, type SkillTag } from '../api'
 import ScoreCounter from '../components/ScoreCounter'
 import SkillPicker from '../components/SkillPicker'
-import { evidenceCardClassName, evidenceTypeSummary, isWeakEvidence } from '../lib/evidence'
+import {
+  evidenceBadgeClassName,
+  evidenceBadgeLabel,
+  evidenceCardClassName,
+  evidenceTypeSummary,
+  isWeakEvidence,
+} from '../lib/evidence'
 
 type Status = 'idle' | 'loading' | 'ready' | 'rate-limited' | 'error'
 
@@ -53,7 +59,7 @@ export default function RecruiterSearch() {
         <button
           type="submit"
           disabled={selectedSkills.length === 0 || status === 'loading'}
-          className="w-full rounded-full bg-neutral-900 px-6 py-3 font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-40 dark:bg-white dark:text-neutral-900"
+          className="bg-accent text-on-accent w-full rounded-full px-6 py-3 font-medium transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {status === 'loading' ? 'Searching…' : 'Search'}
         </button>
@@ -96,7 +102,12 @@ export default function RecruiterSearch() {
                   return (
                     <li key={m.skill} className={evidenceCardClassName(isWeak)}>
                       <div className="flex items-center justify-between gap-3">
-                        <span className="font-medium">{m.skill}</span>
+                        <span className="flex items-center gap-2">
+                          <span className="font-medium">{m.skill}</span>
+                          <span className={evidenceBadgeClassName(m.evidence_type)}>
+                            {evidenceBadgeLabel(m.evidence_type)}
+                          </span>
+                        </span>
                         <ScoreCounter score={m.confidence_score} className={`text-sm ${isWeak ? 'opacity-60' : ''}`} />
                       </div>
                       <p className={`mt-1 text-xs ${isWeak ? 'text-neutral-500' : 'text-neutral-600 dark:text-neutral-400'}`}>

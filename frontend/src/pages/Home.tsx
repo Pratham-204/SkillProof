@@ -31,7 +31,7 @@ export default function Home() {
       {!checking && (
         <a
           href={GITHUB_LOGIN_URL}
-          className="rounded-full bg-neutral-900 px-6 py-3 font-medium text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+          className="bg-accent text-on-accent rounded-full px-6 py-3 font-medium transition hover:opacity-90"
         >
           Connect GitHub
         </a>

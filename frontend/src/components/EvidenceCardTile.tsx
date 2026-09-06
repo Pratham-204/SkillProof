@@ -1,7 +1,13 @@
 import { motion } from 'framer-motion'
 import { useState } from 'react'
 import { explainSkill, type EvidenceCard } from '../api'
-import { evidenceCardClassName, evidenceTypeSummary, isWeakEvidence } from '../lib/evidence'
+import {
+  evidenceBadgeClassName,
+  evidenceBadgeLabel,
+  evidenceCardClassName,
+  evidenceTypeSummary,
+  isWeakEvidence,
+} from '../lib/evidence'
 import ScoreCounter from './ScoreCounter'
 
 const cardVariants = {
@@ -65,7 +71,10 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
   return (
     <motion.li variants={cardVariants} className={evidenceCardClassName(isWeak)}>
       <button type="button" onClick={handleToggle} className="flex w-full items-start justify-between gap-3 text-left">
-        <p className="font-medium">{card.skill}</p>
+        <span className="flex items-center gap-2">
+          <span className="font-medium">{card.skill}</span>
+          <span className={evidenceBadgeClassName(card.evidence_type)}>{evidenceBadgeLabel(card.evidence_type)}</span>
+        </span>
         <ScoreCounter score={card.confidence_score} className={`text-lg ${isWeak ? 'opacity-60' : ''}`} />
       </button>
       <p className={`mt-1 text-xs ${isWeak ? 'text-neutral-500' : 'text-neutral-600 dark:text-neutral-400'}`}>
@@ -94,7 +103,7 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
               <p>
                 {explanation}
                 {isFallback && (
-                  <span className="ml-2 rounded-full bg-neutral-200 px-2 py-0.5 text-[0.65rem] font-medium text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
+                  <span className="ml-2 rounded-full bg-neutral-100 px-2 py-0.5 font-mono text-[0.65rem] uppercase tracking-wide text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
                     template fallback
                   </span>
                 )}

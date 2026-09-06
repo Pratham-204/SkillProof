@@ -40,7 +40,7 @@ export default function SkillPicker({ skills, selected, onChange, max }: SkillPi
             key={name}
             type="button"
             onClick={() => remove(name)}
-            className="flex items-center gap-1 rounded-full bg-neutral-900 px-3 py-1 text-sm text-white dark:bg-white dark:text-neutral-900"
+            className="flex items-center gap-1 rounded-full bg-neutral-900 px-3 py-1 font-mono text-sm text-white dark:bg-white dark:text-neutral-900"
           >
             {name}
             <span aria-hidden="true">&times;</span>

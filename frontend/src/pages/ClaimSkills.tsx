@@ -58,7 +58,7 @@ export default function ClaimSkills() {
         </p>
         <a
           href={GITHUB_LOGIN_URL}
-          className="rounded-full bg-neutral-900 px-6 py-3 font-medium text-white dark:bg-white dark:text-neutral-900"
+          className="bg-accent text-on-accent rounded-full px-6 py-3 font-medium transition hover:opacity-90"
         >
           Reconnect GitHub
         </a>
@@ -93,7 +93,7 @@ export default function ClaimSkills() {
         <button
           type="submit"
           disabled={selected.length === 0 || submitting}
-          className="w-full rounded-full bg-neutral-900 px-6 py-3 font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-40 dark:bg-white dark:text-neutral-900"
+          className="bg-accent text-on-accent w-full rounded-full px-6 py-3 font-medium transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {submitting ? 'Starting…' : `Verify ${selected.length || ''} skill${selected.length === 1 ? '' : 's'}`.trim()}
         </button>
