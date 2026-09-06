@@ -4,6 +4,7 @@ self-extending taxonomy's batch publish job, not evidence and never scored.
 
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from skillproof import manifest_parsing, taxonomy
@@ -33,6 +34,21 @@ def record_sightings(db: Session, candidate_id: str, manifests: dict[str, dict[s
 
 
 def _record_one(db: Session, *, ecosystem: str, package_name: str, candidate_id: str, repo: str) -> None:
+    """The pre-check below only rules out the common case (this exact candidate
+    already has this Sighting, committed, visible to this session). It cannot see
+    a second /verify run for the same candidate that is concurrently ingesting the
+    same repo in its own, still-open transaction — a real production incident, not
+    a hypothetical: two overlapping runs each passed this check, then both tried to
+    insert the same row, and the loser crashed the whole request with an unhandled
+    UniqueViolation instead of just skipping a Sighting nothing needed it to add.
+
+    The `uq_sighting_candidate_repo` constraint is the actual idempotency
+    guarantee; this function's job is just to not treat losing that race as a
+    real failure. `begin_nested()` (a SAVEPOINT) scopes the insert so a conflict
+    only unwinds this one row, not every Sighting already flushed earlier in the
+    same `record_sightings` call or the caller's own transaction — a plain
+    `db.add()` here would poison the whole session on conflict instead.
+    """
     already_recorded = (
         db.query(Sighting)
         .filter_by(ecosystem=ecosystem, package_name=package_name, candidate_id=candidate_id, repo=repo)
@@ -41,4 +57,8 @@ def _record_one(db: Session, *, ecosystem: str, package_name: str, candidate_id:
     )
     if already_recorded:
         return
-    db.add(Sighting(ecosystem=ecosystem, package_name=package_name, candidate_id=candidate_id, repo=repo))
+    try:
+        with db.begin_nested():
+            db.add(Sighting(ecosystem=ecosystem, package_name=package_name, candidate_id=candidate_id, repo=repo))
+    except IntegrityError:
+        pass
