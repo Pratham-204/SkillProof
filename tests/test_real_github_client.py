@@ -161,11 +161,31 @@ def test_list_merged_prs_follows_pagination_on_the_search_endpoint():
     assert {(pr.repo.name, pr.number) for pr in prs} == {("proj-a", 5), ("proj-b", 9)}
 
 
-def test_list_pr_review_comments_follows_link_header_pagination():
-    """PR review comments are the exact >100-comments case candidate 2's problem
-    statement named — must not be truncated at page 1 either."""
+def _search_response(numbers: list[int]) -> httpx.Response:
+    return httpx.Response(200, json={"items": [{"number": n} for n in numbers]})
+
+
+def test_list_pr_review_comments_finds_commented_prs_via_search_then_paginates_each():
+    """Round: full-repo /pulls/comments pagination (no server-side author
+    filter, oldest-first) could page for minutes on a busy repo just to find
+    one candidate's handful of comments, dropping their most RECENT ones
+    first once max_pages capped it (bug 3c) — a real production case: 80+
+    pages on one repo for a candidate who had zero qualifying comments there.
+    Now: one Search API call finds the small set of PRs this candidate
+    actually commented on (verified against live GitHub data that
+    `commenter:` indexes inline diff review comments, not just conversation
+    comments), and only those PRs' comments are fetched — each individually
+    still Link-header-paginated, so a single busy PR's comments aren't
+    truncated at page 1 either."""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/search/issues":
+            assert "commenter:octodev" in request.url.params["q"]
+            assert "repo:octodev/skillproof-lib" in request.url.params["q"]
+            return _search_response([1])
+        # Must be scoped to the one PR the search step found, never the old
+        # repo-wide /repos/.../pulls/comments endpoint.
+        assert request.url.path == "/repos/octodev/skillproof-lib/pulls/1/comments"
         if request.url.params.get("page") == "2":
             return httpx.Response(
                 200,
@@ -192,7 +212,7 @@ def test_list_pr_review_comments_follows_link_header_pagination():
             ],
             headers={
                 "Link": (
-                    '<https://api.github.com/repos/octodev/skillproof-lib/pulls/comments'
+                    '<https://api.github.com/repos/octodev/skillproof-lib/pulls/1/comments'
                     '?per_page=100&page=2>; rel="next"'
                 )
             },
@@ -205,13 +225,35 @@ def test_list_pr_review_comments_follows_link_header_pagination():
     assert {c.comment_id for c in comments} == {1, 2}
 
 
+def test_list_pr_review_comments_returns_empty_when_search_finds_no_commented_prs():
+    """The common case: this repo is only in `all_repos` because the candidate
+    has a merged PR there (ingestion.py), not because they reviewed anyone
+    else's work — Search finding zero commented PRs must skip straight to an
+    empty result, not fall back to the old expensive full-repo pagination."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return _search_response([])
+
+    client = _client(handler)
+
+    comments = client.list_pr_review_comments("token", Repo(owner="octodev", name="skillproof-lib"), "octodev")
+
+    assert comments == []
+    assert calls == ["/search/issues"]  # never fetched any PR's comments
+
+
 def test_get_all_pages_logs_a_warning_when_max_pages_is_exhausted(caplog):
     """Any paginated caller relying on the max_pages safety cap must not
-    silently truncate results with zero signal — list_pr_review_comments (bug
-    3c: oldest-first across the whole repo, so a candidate's own recent
-    comments are what gets dropped) and _fetch_owned_commits (bug 3d:
-    newest-first, so the dropped tail is the oldest/Span-relevant commits)
-    both hit this same cap. One shared check in _get_all_pages covers both."""
+    silently truncate results with zero signal. Originally motivated by
+    _fetch_owned_commits (bug 3d: newest-first, so the dropped tail is the
+    oldest/Span-relevant commits) and list_pr_review_comments's old
+    full-repo-pagination design (bug 3c, since replaced by a Search-API-based
+    fetch — see test_list_pr_review_comments_finds_commented_prs_via_search_
+    then_paginates_each — but the same cap still guards its new per-PR and
+    search-result pagination too). One shared check in _get_all_pages covers
+    every caller."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         page = int(request.url.params.get("page") or "1")
@@ -246,6 +288,9 @@ def test_list_pr_review_comments_skips_deleted_account_comments_without_crashing
     ingestion.py's thread pool) and failed every claimed skill's card for the run."""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/search/issues":
+            return _search_response([1])
+        assert request.url.path == "/repos/octodev/skillproof-lib/pulls/1/comments"
         return httpx.Response(
             200,
             json=[

@@ -464,28 +464,75 @@ class RealGitHubClient(GitHubClient):
         )
 
     def list_pr_review_comments(self, token: str, repo: Repo, author_login: str) -> list[PrCommentRecord]:
+        """Finds review comments this candidate left anywhere in `repo` — not
+        just on their own PRs, since ingestion.py calls this for every repo in
+        `all_repos` (owned + every repo with a merged PR), looking for comments
+        the candidate may have left reviewing someone else's work too.
+
+        Two steps, not one full-repo pagination pass over `/pulls/comments`:
+        that endpoint has no server-side author filter and returns oldest-first,
+        so on a repo with thousands of comments from every contributor it can
+        page for many minutes just to find this one candidate's handful (a real
+        production case: 80+ pages on one repo, still paginating after 6+
+        minutes on another, for a candidate who ultimately had zero qualifying
+        comments in either) — and the max_pages safety net then drops the
+        candidate's most RECENT comments first, the opposite of what a
+        truncation should preserve. GitHub's Search API's `commenter:`
+        qualifier finds the small set of PRs this candidate actually commented
+        on in one cheap call — verified directly against live GitHub data that
+        it indexes inline diff review comments, not just general PR
+        conversation comments — and only those PRs' comments are fetched and
+        filtered by author, instead of every comment in the repo.
+
+        The Search API draws from a separate, much stricter rate-limit bucket
+        (30/min, not the regular 5000/hour REST budget) — budgeted here as
+        exactly one search call per repo, per ADR-0015.
+        """
         try:
-            data = self._get_all_pages(token, f"/repos/{repo.full_name}/pulls/comments", params={"per_page": 100})
+            pr_numbers = self._find_commented_pr_numbers(token, repo, author_login)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in _SKIPPABLE_STATUSES:
-                # Same stale-search-hit gap as _fetch_pr_commits above: skip this
-                # repo's PR comments rather than aborting the whole scan.
                 logger.warning(
-                    "Skipping PR review comments for %s: fetch returned %s", repo.full_name, _skip_reason(exc)
+                    "Skipping PR review comments for %s: search returned %s", repo.full_name, _skip_reason(exc)
                 )
                 return []
             raise
-        return [
-            PrCommentRecord(
-                repo=repo,
-                comment_id=c["id"],
-                body=c["body"],
-                date=_parse_date(c["created_at"]),
-                url=c["html_url"],
+
+        comments: list[PrCommentRecord] = []
+        for number in pr_numbers:
+            try:
+                data = self._get_all_pages(
+                    token, f"/repos/{repo.full_name}/pulls/{number}/comments", params={"per_page": 100}, max_pages=10
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in _SKIPPABLE_STATUSES:
+                    # Same stale-search-hit gap as _fetch_pr_commits above: skip this
+                    # one PR's comments rather than aborting the whole repo.
+                    logger.warning(
+                        "Skipping PR #%s review comments for %s: fetch returned %s",
+                        number,
+                        repo.full_name,
+                        _skip_reason(exc),
+                    )
+                    continue
+                raise
+            comments.extend(
+                PrCommentRecord(
+                    repo=repo,
+                    comment_id=c["id"],
+                    body=c["body"],
+                    date=_parse_date(c["created_at"]),
+                    url=c["html_url"],
+                )
+                for c in data
+                if (c.get("user") or {}).get("login", "").lower() == author_login.lower()
             )
-            for c in data
-            if (c.get("user") or {}).get("login", "").lower() == author_login.lower()
-        ]
+        return comments
+
+    def _find_commented_pr_numbers(self, token: str, repo: Repo, author_login: str) -> list[int]:
+        query = f"type:pr repo:{repo.full_name} commenter:{author_login}"
+        data = self._get_all_pages(token, "/search/issues", params={"q": query, "per_page": 100}, max_pages=10)
+        return [item["number"] for item in data]
 
     def get_manifest_files(self, token: str, repo: Repo) -> dict[str, str]:
         """Checks all `MANIFEST_FILENAMES` concurrently instead of one at a time
