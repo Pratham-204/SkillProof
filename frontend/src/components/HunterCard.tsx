@@ -92,16 +92,20 @@ export default function HunterCard({ githubLogin, cards }: HunterCardProps) {
               style={{ boxShadow: `0 0 0 2px ${theme.ink}, 0 0 28px -4px ${theme.glow}` }}
             >
               {!avatarFailed ? (
-                // No `crossOrigin` here on purpose: GitHub's avatar endpoint
-                // sends no CORS headers, so requesting it in CORS mode fails
-                // the load outright and the avatar never displays. A plain
-                // (non-CORS) <img> loads and paints fine — the tradeoff only
-                // shows up in the export path below, which already falls
-                // back to a visible error message if the browser can't read
-                // this cross-origin image back out of the canvas.
+                // crossOrigin="anonymous" is required for the export path
+                // below: html-to-image rasterizes this element to a canvas,
+                // and a cross-origin image loaded without CORS taints that
+                // canvas — toPng() then throws a SecurityError on every
+                // export, always caught by the try/catch as a generic
+                // failure. github.com/{login}.png redirects to
+                // avatars.githubusercontent.com, which does send
+                // `Access-Control-Allow-Origin: *` (verified directly), so a
+                // CORS-mode request here loads the same image without
+                // tainting anything.
                 <img
                   src={`https://github.com/${githubLogin}.png?size=200`}
                   alt=""
+                  crossOrigin="anonymous"
                   onError={() => setAvatarFailed(true)}
                   className="h-full w-full rounded-full object-cover"
                 />
