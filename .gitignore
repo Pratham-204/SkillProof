@@ -7,3 +7,18 @@ src/skillproof/data/skills_embeddings.npz
 .pytest_cache/
 .mypy_cache/
 .env
+
+# Claude Code tooling config — local to this machine's agent setup, not
+# application source.
+.agents/
+.claude/
+skills-lock.json
+
+# Hackathon submission decks and personal scratch notes — not part of the
+# product; kept out so a future `git add -A` can't sweep them in by accident.
+/*.pptx
+/*.pdf
+.scratch/*.pptx
+.scratch/pptx-unpacked/
+.scratch/deck-check*.md
+.scratch/oss-tooling-survey/
