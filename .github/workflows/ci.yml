@@ -29,7 +29,7 @@ jobs:
       # restore-keys falls back to the closest prior cache to warm from when
       # the exact key is new.
       - name: Cache HuggingFace model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface
           key: huggingface-all-MiniLM-L6-v2-${{ hashFiles('pyproject.toml') }}
