@@ -5,7 +5,7 @@ faked with fixture/canned data, embeddings and scoring run for real.
 
 import threading
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -434,6 +434,33 @@ def test_verify_rejects_a_second_call_while_one_is_already_in_flight(client, fak
     response = client.post("/verify", json={"skills": ["Rust"]})
 
     assert response.status_code == 409
+
+
+def test_verify_allows_a_second_call_once_the_in_flight_card_is_stale(client, fake_github, db_session_factory):
+    """A "processing" card left behind by a run that was killed mid-scan (e.g.
+    a container replaced mid-scan during a deploy) has no other way to ever
+    clear -- run_verification's finally block never ran, and nothing times out
+    or retries a stale row -- so the in-flight guard above would otherwise
+    block this candidate from ever verifying again, forever. This actually
+    happened in production: a candidate's account was permanently stuck on
+    409 after a deploy killed their scan mid-loop. A "processing" card old
+    enough that no real scan (~1 minute per ADR-0015, even with generous
+    rate-limit backoff headroom) could still be running must not count as
+    in-flight."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    db = db_session_factory()
+    candidate = db.get(Candidate, candidate_id)
+    verify_service.start_verification(db, candidate, ["FastAPI"])
+    stale_card = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill="FastAPI").one()
+    stale_card.updated_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    db.commit()
+    db.close()
+
+    response = client.post("/verify", json={"skills": ["Rust"]})
+
+    assert response.status_code == 202
 
 
 def test_run_verification_uses_the_taxonomy_version_start_verification_pinned(

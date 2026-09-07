@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -15,15 +16,38 @@ from skillproof.security import TokenDecryptionError
 
 logger = logging.getLogger(__name__)
 
+# A real scan budgets ~1 minute (ADR-0015), even with rate-limit backoff
+# headroom -- a "processing" card older than this was not abandoned by a slow
+# scan, it was abandoned by a run whose process died before reaching its own
+# finally block (most commonly: a deploy replacing the container mid-scan).
+# Nothing else ever revisits a "processing" row, so without this bound a
+# single interrupted run permanently locks that candidate out of ever
+# verifying again -- confirmed in production (a candidate's account was stuck
+# on 409 for hours after a deploy killed their scan mid-loop).
+STALE_PROCESSING_THRESHOLD = timedelta(minutes=20)
+
+
+def _age(moment: datetime) -> timedelta:
+    """SQLite (tests, single-writer local dev) silently drops tzinfo on
+    read-back even for a `DateTime(timezone=True)` column -- confirmed
+    empirically -- while Postgres (production) correctly round-trips it.
+    `updated_at` is always written via `models._now()` (UTC), so a naive
+    value read back is safe to treat as UTC rather than local time."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - moment
+
 
 class VerificationInFlightError(Exception):
-    """Raised by start_verification when this candidate already has a
-    status="processing" card at the moment a new run is about to reset/create
-    rows. Without this, two overlapping /verify calls (a double-click, a
-    client retry, two open tabs) each schedule their own run_verification
-    background job writing the same rows with no locking -- whichever job
-    commits last silently wins, discarding the other's freshly-computed
-    result with no error surfaced anywhere."""
+    """Raised by start_verification when this candidate already has a recent
+    (within STALE_PROCESSING_THRESHOLD) status="processing" card at the
+    moment a new run is about to reset/create rows. Without this, two
+    overlapping /verify calls (a double-click, a client retry, two open tabs)
+    each schedule their own run_verification background job writing the same
+    rows with no locking -- whichever job commits last silently wins,
+    discarding the other's freshly-computed result with no error surfaced
+    anywhere. A "processing" card older than the threshold is treated as
+    abandoned, not in-flight (see STALE_PROCESSING_THRESHOLD)."""
 
 
 def start_verification(db: Session, candidate: Candidate, skills: list[str]) -> int:
@@ -61,11 +85,10 @@ def start_verification(db: Session, candidate: Candidate, skills: list[str]) -> 
     # exactly the gap this guards.
     db.query(Candidate).filter_by(candidate_id=candidate.candidate_id).with_for_update().one()
 
-    already_in_flight = (
+    in_flight_card = (
         db.query(EvidenceCard).filter_by(candidate_id=candidate.candidate_id, status="processing").first()
-        is not None
     )
-    if already_in_flight:
+    if in_flight_card is not None and _age(in_flight_card.updated_at) < STALE_PROCESSING_THRESHOLD:
         raise VerificationInFlightError(candidate.candidate_id)
 
     current_version = taxonomy.taxonomy_version()
