@@ -21,7 +21,10 @@ class SearchableUpdate(BaseModel):
 
 
 class VerifyRequest(BaseModel):
-    skills: list[str] = Field(min_length=1)
+    # CONTEXT.md round 6: "a fixed cap of 8 Skill Tags per /verify call" —
+    # without this, nothing stopped a client from requesting an unbounded
+    # number of skills (and hence EvidenceCard rows/scoring work) in one call.
+    skills: list[str] = Field(min_length=1, max_length=8)
     searchable: bool | None = None
 
 

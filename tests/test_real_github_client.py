@@ -851,10 +851,10 @@ def test_client_survives_reuse_across_two_verification_runs(db_session_factory):
     for _ in range(2):
         db = db_session_factory()
         candidate = db.get(Candidate, candidate_id)
-        verify_service.start_verification(db, candidate, ["FastAPI"])
+        taxonomy_version = verify_service.start_verification(db, candidate, ["FastAPI"])
         db.close()
 
-        verify_service.run_verification(db_session_factory, candidate_id, ["FastAPI"], client)
+        verify_service.run_verification(db_session_factory, candidate_id, ["FastAPI"], client, taxonomy_version)
 
         db = db_session_factory()
         card = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill="FastAPI").one()

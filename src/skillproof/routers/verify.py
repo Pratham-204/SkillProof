@@ -1,7 +1,7 @@
 import queue
 
 import anyio
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
@@ -9,15 +9,34 @@ from skillproof import taxonomy, verify_service
 from skillproof.db import get_db
 from skillproof.deps import get_current_candidate, get_github_client, get_session_factory
 from skillproof.github_client import GitHubClient
+from skillproof.limiter import limiter
 from skillproof.models import Candidate, EvidenceCard
 from skillproof.progress_bus import ProgressEvent, progress_bus
 from skillproof.schemas import VerifyAccepted, VerifyRequest
 
 router = APIRouter(tags=["verify"])
 
+# /verify is the single most expensive endpoint in the app (a GitHub API scan
+# plus embedding computation, run as a background job) -- unlike GET /search,
+# nothing throttled it at all before this.
+VERIFY_RATE_LIMIT = "10/minute"
+
+# Each poll blocks its worker thread for at most this long, so a client
+# disconnect (or the process shutting down) is noticed within one interval
+# instead of `events.get()` blocking that thread forever.
+_STREAM_POLL_TIMEOUT = 15.0
+# If nothing has been published in this long, this run's publisher is never
+# coming back (e.g. the process that would have published it was killed
+# mid-scan across a redeploy, per progress_bus's own in-memory-only design) --
+# give up rather than holding the connection and its thread pool slot open
+# indefinitely.
+_STREAM_MAX_IDLE_SECONDS = 20 * 60.0
+
 
 @router.post("/verify", response_model=VerifyAccepted, status_code=202)
+@limiter.limit(VERIFY_RATE_LIMIT)
 def verify(
+    request: Request,
     payload: VerifyRequest,
     background_tasks: BackgroundTasks,
     candidate: Candidate = Depends(get_current_candidate),
@@ -39,10 +58,20 @@ def verify(
         candidate.searchable = payload.searchable
         db.commit()
 
-    verify_service.start_verification(db, candidate, payload.skills)
+    try:
+        current_taxonomy_version = verify_service.start_verification(db, candidate, payload.skills)
+    except verify_service.VerificationInFlightError as exc:
+        raise HTTPException(
+            status_code=409, detail="A verification is already in progress for this candidate"
+        ) from exc
 
     background_tasks.add_task(
-        verify_service.run_verification, session_factory, candidate.candidate_id, payload.skills, github_client
+        verify_service.run_verification,
+        session_factory,
+        candidate.candidate_id,
+        payload.skills,
+        github_client,
+        current_taxonomy_version,
     )
 
     return VerifyAccepted(candidate_id=candidate.candidate_id, skills=payload.skills)
@@ -86,13 +115,27 @@ async def verify_stream(candidate_id: str, session_factory=Depends(get_session_f
     events: queue.Queue[ProgressEvent] = progress_bus.subscribe(candidate_id)
 
     async def event_stream():
+        idle_seconds = 0.0
         try:
             while True:
-                event = await anyio.to_thread.run_sync(events.get)
+                try:
+                    event = await anyio.to_thread.run_sync(events.get, True, _STREAM_POLL_TIMEOUT)
+                except queue.Empty:
+                    idle_seconds += _STREAM_POLL_TIMEOUT
+                    if idle_seconds >= _STREAM_MAX_IDLE_SECONDS:
+                        # Nothing has published in a very long time -- treat
+                        # this the same as a normal completion rather than
+                        # holding the connection (and its thread pool slot)
+                        # open forever on a run whose publisher is gone.
+                        yield {"event": "done", "data": ""}
+                        break
+                    yield {"event": "keepalive", "data": ""}
+                    continue
+                idle_seconds = 0.0
                 yield {"event": event.kind, "data": event.detail}
                 if event.kind == "done":
                     break
         finally:
-            progress_bus.unsubscribe(candidate_id)
+            progress_bus.unsubscribe(candidate_id, events)
 
     return EventSourceResponse(event_stream())

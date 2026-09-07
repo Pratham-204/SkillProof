@@ -3,12 +3,13 @@ spec's testing decisions: one seam at the FastAPI boundary, GitHub and Groq
 faked with fixture/canned data, embeddings and scoring run for real.
 """
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from skillproof import taxonomy, verify_service
+from skillproof import scoring, taxonomy, verify_service
 from skillproof.github_client import CommitRecord, GitHubUser, Repo
 from skillproof.ingestion import EvidenceBundle, EvidenceItem
 from skillproof.models import Candidate, CandidateSession, EvidenceCard, Sighting
@@ -256,6 +257,19 @@ def test_verify_rejects_skill_removed_from_taxonomy(client, fake_github):
     assert response.status_code == 400
 
 
+def test_verify_rejects_more_than_the_eight_skill_cap(client, fake_github):
+    """CONTEXT.md round 6: 'a fixed cap of 8 Skill Tags per /verify call
+    (rejected with 400 if exceeded)' -- previously unenforced anywhere
+    (schemas.py set only min_length=1 on VerifyRequest.skills), so a client
+    could request an unbounded number of skills in one call."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    _connect(client)
+
+    response = client.post("/verify", json={"skills": ["FastAPI"] * 9})
+
+    assert response.status_code == 422
+
+
 def test_verify_scores_qualifying_evidence_and_excludes_low_signal(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate = _connect(client)
@@ -373,6 +387,125 @@ def test_reverify_under_bumped_taxonomy_version_forks_a_new_card(client, fake_gi
         db.close()
 
 
+def test_verify_with_duplicate_skill_in_payload_does_not_500(client, fake_github):
+    """Two identical skill entries in one /verify call both look up "no existing
+    card yet" before either write is visible to the other (SessionLocal runs
+    with autoflush=False) -- previously both then tried to INSERT the same
+    (candidate_id, skill, taxonomy_version) row, and the loser's commit raised
+    an unhandled IntegrityError instead of the same idempotent 202 an ordinary
+    double-submit/duplicate-multi-select client bug deserves."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    response = client.post("/verify", json={"skills": ["FastAPI", "FastAPI"]})
+    assert response.status_code == 202
+
+    cards = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
+    assert len(cards) == 1
+
+
+def test_verify_rejects_a_second_call_while_one_is_already_in_flight(client, fake_github, db_session_factory):
+    """Nothing previously stopped a second /verify call for a candidate while an
+    earlier one is still status="processing" -- two concurrent run_verification
+    jobs would then write the same EvidenceCard rows with no locking, and
+    interleave their events into the single shared progress_bus queue for that
+    candidate. Reject outright instead of silently scheduling a second run."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    db = db_session_factory()
+    candidate = db.get(Candidate, candidate_id)
+    verify_service.start_verification(db, candidate, ["FastAPI"])
+    db.close()
+
+    response = client.post("/verify", json={"skills": ["Rust"]})
+
+    assert response.status_code == 409
+
+
+def test_run_verification_uses_the_taxonomy_version_start_verification_pinned(
+    client, fake_github, db_session_factory, monkeypatch
+):
+    """run_verification previously called taxonomy.taxonomy_version() again on
+    its own, independent of whatever start_verification had already stamped the
+    "processing" rows with -- if the taxonomy is bumped in between (the
+    self-extending taxonomy batch job can do this at any time), every card
+    lookup in run_verification then misses (NoResultFound) since the rows only
+    exist at the older version, crashing the whole run instead of updating the
+    exact rows this run was launched for, as its own docstring already claims
+    it does."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    db = db_session_factory()
+    candidate = db.get(Candidate, candidate_id)
+    pinned_version = verify_service.start_verification(db, candidate, ["FastAPI"])
+    db.close()
+
+    monkeypatch.setattr(taxonomy, "taxonomy_version", lambda: pinned_version + 1)
+
+    verify_service.run_verification(db_session_factory, candidate_id, ["FastAPI"], fake_github, pinned_version)
+
+    cards = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
+    assert len(cards) == 1
+    assert cards[0]["status"] == "complete"
+    assert cards[0]["taxonomy_version"] == pinned_version
+
+
+def test_run_verification_isolates_a_card_write_failure_from_remaining_skills(client, fake_github, monkeypatch):
+    """The try/except around the per-skill loop previously only wrapped the
+    scoring.score_skill() call itself, not the card lookup/write/commit that
+    follows a successful score -- an exception there escaped the `for skill in
+    skills` loop entirely, leaving every skill after the failing one stuck at
+    "processing" forever even though the surrounding comment already claims
+    per-skill isolation covers exactly this."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    real_score_skill = scoring.score_skill
+
+    def score_but_break_rusts_card_write(bundle, skill):
+        result = real_score_skill(bundle, skill)
+        if skill == "Rust":
+            # Not a dataclass -- asdict() raises TypeError while writing the
+            # card, simulating a write-side failure unrelated to scoring itself
+            # (a transient DB error, a version mismatch, etc).
+            return replace(result, source_commits=[object()])
+        return result
+
+    monkeypatch.setattr(verify_service.scoring, "score_skill", score_but_break_rusts_card_write)
+
+    response = client.post("/verify", json={"skills": ["FastAPI", "Rust", "Django"]})
+    assert response.status_code == 202
+
+    cards = {c["skill"]: c for c in client.get(f"/evidence-card/{candidate_id}").json()["cards"]}
+    assert cards["FastAPI"]["status"] == "complete"
+    assert cards["Rust"]["status"] == "failed"
+    assert cards["Django"]["status"] == "complete"  # not stuck "processing" forever
+
+
+def test_evidence_card_error_does_not_leak_raw_exception_text(client, fake_github, monkeypatch):
+    """GET /evidence-card/{candidate_id} is unauthenticated and public by design
+    (candidate_id is intentionally guessable, per models.py's own docstring) --
+    an unexpected internal exception's raw str(exc) must never reach that
+    response, since it can carry file paths, hostnames, or fragments of an
+    upstream API's error body."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    def boom(bundle, skill):
+        raise RuntimeError("connection to internal-host-7.svc.cluster.local:5432 refused")
+
+    monkeypatch.setattr(verify_service.scoring, "score_skill", boom)
+
+    client.post("/verify", json={"skills": ["FastAPI"]})
+
+    card = client.get(f"/evidence-card/{candidate_id}").json()["cards"][0]
+    assert card["status"] == "failed"
+    assert card["error"]
+    assert "internal-host-7.svc.cluster.local" not in card["error"]
+
+
 def test_verify_with_revoked_token_prompts_reconnect(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     candidate_id = _connect(client)["candidate_id"]
@@ -485,9 +618,9 @@ def test_a_skill_with_matching_evidence_is_isolated_from_a_siblings_embeddings_f
 
     db = db_session_factory()
     candidate = db.get(Candidate, candidate_id)
-    verify_service.start_verification(db, candidate, ["FastAPI", "Django"])
+    taxonomy_version = verify_service.start_verification(db, candidate, ["FastAPI", "Django"])
     db.close()
-    verify_service.run_verification(db_session_factory, candidate_id, ["FastAPI", "Django"], fake_github)
+    verify_service.run_verification(db_session_factory, candidate_id, ["FastAPI", "Django"], fake_github, taxonomy_version)
 
     cards = {c["skill"]: c for c in client.get(f"/evidence-card/{candidate_id}").json()["cards"]}
     assert cards["FastAPI"]["status"] == "failed"

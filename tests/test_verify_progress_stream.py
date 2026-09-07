@@ -26,6 +26,7 @@ uvicorn server once the frontend consumes this endpoint (ticket 05), not here.
 from skillproof import verify_service
 from skillproof.models import Candidate
 from skillproof.progress_bus import progress_bus
+from skillproof.routers import verify as verify_router
 from tests.fixtures.github_fixtures import EXTERNAL_REPO, OWNED_REPO, wire_verified_candidate
 from tests.test_api_flow import _connect
 
@@ -42,11 +43,11 @@ def test_run_verification_publishes_real_scan_then_reveal_events_in_order(client
 
     db = db_session_factory()
     candidate = db.get(Candidate, candidate_id)
-    verify_service.start_verification(db, candidate, ["FastAPI", "Rust"])
+    taxonomy_version = verify_service.start_verification(db, candidate, ["FastAPI", "Rust"])
     db.close()
 
     q = progress_bus.subscribe(candidate_id)
-    verify_service.run_verification(db_session_factory, candidate_id, ["FastAPI", "Rust"], fake_github)
+    verify_service.run_verification(db_session_factory, candidate_id, ["FastAPI", "Rust"], fake_github, taxonomy_version)
 
     events = []
     while True:
@@ -54,7 +55,7 @@ def test_run_verification_publishes_real_scan_then_reveal_events_in_order(client
         events.append((event.kind, event.detail))
         if event.kind == "done":
             break
-    progress_bus.unsubscribe(candidate_id)
+    progress_bus.unsubscribe(candidate_id, q)
 
     scan_events = [detail for kind, detail in events if kind == "scan"]
     reveal_events = [detail for kind, detail in events if kind == "reveal"]
@@ -91,6 +92,33 @@ def test_verify_stream_reconnect_after_already_finished_closes_immediately(clien
 
     events = _parse_sse_body(response.text)
     assert events == [("done", "")]
+
+
+def test_verify_stream_gives_up_after_prolonged_silence(client, fake_github, db_session_factory, monkeypatch):
+    """`events.get()` previously had no timeout at all, so a stream whose
+    publisher will never publish again (e.g. the process that would have
+    published it was killed mid-scan across a redeploy) blocked its worker
+    thread forever -- the same shared thread pool every other sync route in
+    the app depends on. Bounding each poll and giving up after sustained
+    silence releases the connection (and the thread) instead."""
+    monkeypatch.setattr(verify_router, "_STREAM_POLL_TIMEOUT", 0.01)
+    monkeypatch.setattr(verify_router, "_STREAM_MAX_IDLE_SECONDS", 0.03)
+
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    db = db_session_factory()
+    candidate = db.get(Candidate, candidate_id)
+    verify_service.start_verification(db, candidate, ["FastAPI"])
+    db.close()
+    # Nobody will ever publish to this candidate's queue: run_verification is
+    # deliberately never invoked, simulating a publisher that died mid-scan.
+
+    response = client.get(f"/verify/{candidate_id}/stream")
+
+    assert response.status_code == 200
+    events = _parse_sse_body(response.text)
+    assert events[-1] == ("done", "")
 
 
 def _parse_sse_body(text: str) -> list[tuple[str, str]]:
