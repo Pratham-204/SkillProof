@@ -43,6 +43,24 @@ def start_verification(db: Session, candidate: Candidate, skills: list[str]) -> 
     Raises VerificationInFlightError instead of proceeding if this candidate
     already has a run in progress (see that class's docstring).
     """
+    # Serializes the check-and-mark-processing sequence below against another
+    # truly concurrent call for the *same* candidate (two open tabs, a
+    # double-click, a client retry racing itself) -- without this, a plain
+    # read-then-write "already in flight?" check is a TOCTOU: both calls'
+    # SELECT can run before either commits status="processing", so both pass
+    # the check and both schedule their own run_verification job writing the
+    # same rows with no locking, exactly what VerificationInFlightError exists
+    # to prevent. SELECT ... FOR UPDATE on the candidate's own row makes the
+    # second concurrent caller block here until the first call's transaction
+    # commits (releasing the lock) or rolls back, so it then sees the
+    # already-committed "processing" rows and is correctly rejected below.
+    # SQLite (used in tests and single-writer local dev) has no row-level
+    # locking and silently ignores FOR UPDATE -- harmless there since SQLite
+    # already serializes writers at the connection/file level; this only
+    # changes behavior under a real concurrent Postgres deployment, which is
+    # exactly the gap this guards.
+    db.query(Candidate).filter_by(candidate_id=candidate.candidate_id).with_for_update().one()
+
     already_in_flight = (
         db.query(EvidenceCard).filter_by(candidate_id=candidate.candidate_id, status="processing").first()
         is not None

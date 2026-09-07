@@ -1,4 +1,5 @@
 import queue
+import threading
 
 import anyio
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -31,6 +32,58 @@ _STREAM_POLL_TIMEOUT = 15.0
 # give up rather than holding the connection and its thread pool slot open
 # indefinitely.
 _STREAM_MAX_IDLE_SECONDS = 20 * 60.0
+
+# The stream endpoint is intentionally unauthenticated (see verify_stream's
+# docstring), so unlike every other mutating/expensive route it can't lean on
+# a session or an existing per-candidate check to bound request volume -- it
+# needs its own IP-keyed limit the same way POST /verify does.
+VERIFY_STREAM_RATE_LIMIT = "30/minute"
+
+# progress_bus's own docstring says "a candidate normally has at most one live
+# SSE stream at a time" -- this enforces that as a real, small cap instead of
+# just documenting it. Each open stream repeatedly borrows a slot from
+# anyio's shared default thread pool (the same pool Starlette uses to run
+# every other synchronous route in this app, and to dispatch
+# BackgroundTasks), so an unbounded number of concurrent connections against
+# one candidate_id -- trivial to open, since this route requires no auth --
+# can starve every other route regardless of the per-connection poll timeout.
+_MAX_STREAM_SUBSCRIBERS_PER_CANDIDATE = 4
+_stream_subscriber_counts: dict[str, int] = {}
+_stream_subscriber_counts_lock = threading.Lock()
+
+
+def _try_reserve_stream_slot(candidate_id: str) -> bool:
+    """Claims one of this candidate's limited concurrent-stream slots.
+
+    Returns False (reserving nothing) once the cap is already reached, so the
+    caller can reject the connection instead of letting it queue behind
+    however many others are already open.
+    """
+    with _stream_subscriber_counts_lock:
+        current = _stream_subscriber_counts.get(candidate_id, 0)
+        if current >= _MAX_STREAM_SUBSCRIBERS_PER_CANDIDATE:
+            return False
+        _stream_subscriber_counts[candidate_id] = current + 1
+        return True
+
+
+def _release_stream_slot(candidate_id: str) -> None:
+    with _stream_subscriber_counts_lock:
+        current = _stream_subscriber_counts.get(candidate_id, 0)
+        if current <= 1:
+            _stream_subscriber_counts.pop(candidate_id, None)
+        else:
+            _stream_subscriber_counts[candidate_id] = current - 1
+
+
+def _count_in_flight(session_factory, candidate_id: str) -> bool:
+    """Blocking DB check, run off the event loop via anyio.to_thread.run_sync
+    (see verify_stream) rather than inline in the async route."""
+    db = session_factory()
+    try:
+        return db.query(EvidenceCard).filter_by(candidate_id=candidate_id, status="processing").count() > 0
+    finally:
+        db.close()
 
 
 @router.post("/verify", response_model=VerifyAccepted, status_code=202)
@@ -78,17 +131,32 @@ def verify(
 
 
 @router.get("/verify/{candidate_id}/stream")
-async def verify_stream(candidate_id: str, session_factory=Depends(get_session_factory)) -> EventSourceResponse:
+@limiter.limit(VERIFY_STREAM_RATE_LIMIT)
+async def verify_stream(
+    request: Request, candidate_id: str, session_factory=Depends(get_session_factory)
+) -> EventSourceResponse:
     """Real progress for an in-flight `/verify` run (ticket 03): a "scan" event
     per repo, a "reveal" event per skill, terminating in "done" — never
     fabricated/simulated progress. No auth required: everything streamed here
     (repo names, skill names) is already public once evidence-card/{candidate_id}
-    is, unlike candidate_id-authenticated writes (ADR-0006).
+    is, unlike candidate_id-authenticated writes (ADR-0006). Because it's
+    unauthenticated, it carries its own IP rate limit (VERIFY_STREAM_RATE_LIMIT)
+    and a small per-candidate cap on concurrently open streams (below) — without
+    those, an attacker could hold an unbounded number of connections open
+    against any in-flight candidate_id, each one repeatedly borrowing a slot
+    from anyio's shared thread pool and starving every other synchronous route
+    in the app.
 
     If nothing is currently `processing` for this candidate — the run already
     finished, or never started — this returns a single "done" event and closes
     immediately rather than waiting on a background job that may never publish
-    again, satisfying the "reconnect after finished" requirement.
+    again, satisfying the "reconnect after finished" requirement. This check
+    subscribes to progress_bus *before* looking, and unsubscribes again if
+    the check comes back "not in flight" — subscribing first closes a race
+    where the run finishes (and publishes its terminal "done") in the gap
+    between the check and the subscribe call, which would otherwise be missed
+    outright (progress_bus never replays events published before a subscriber
+    existed) and only be noticed later via the idle-giveup fallback below.
 
     Uses its own short-lived session for that one check rather than a
     request-scoped `Depends(get_db)` — a streaming response holds its
@@ -98,21 +166,31 @@ async def verify_stream(candidate_id: str, session_factory=Depends(get_session_f
     for as long as this stream stays open: a real deadlock, not just a test
     artifact, since the same single-connection pattern is how any pool with a
     small max size would behave under this endpoint's naturally long lifetime.
+    That check also runs off the event loop via `anyio.to_thread.run_sync`
+    rather than blocking it inline, consistent with how the rest of this
+    endpoint already treats blocking work.
     """
-    db = session_factory()
+    if not _try_reserve_stream_slot(candidate_id):
+        raise HTTPException(
+            status_code=429, detail="Too many concurrent verification streams for this candidate"
+        )
+
+    events: queue.Queue[ProgressEvent] = progress_bus.subscribe(candidate_id)
     try:
-        in_flight = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, status="processing").count() > 0
-    finally:
-        db.close()
+        in_flight = await anyio.to_thread.run_sync(_count_in_flight, session_factory, candidate_id)
+    except BaseException:
+        progress_bus.unsubscribe(candidate_id, events)
+        _release_stream_slot(candidate_id)
+        raise
 
     if not in_flight:
+        progress_bus.unsubscribe(candidate_id, events)
+        _release_stream_slot(candidate_id)
 
         async def already_finished():
             yield {"event": "done", "data": ""}
 
         return EventSourceResponse(already_finished())
-
-    events: queue.Queue[ProgressEvent] = progress_bus.subscribe(candidate_id)
 
     async def event_stream():
         idle_seconds = 0.0
@@ -137,5 +215,6 @@ async def verify_stream(candidate_id: str, session_factory=Depends(get_session_f
                     break
         finally:
             progress_bus.unsubscribe(candidate_id, events)
+            _release_stream_slot(candidate_id)
 
     return EventSourceResponse(event_stream())

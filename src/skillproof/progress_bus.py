@@ -8,13 +8,14 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ProgressEvent:
     """One real, already-happened step of a `/verify` run (ticket 03): a repo
-    finished scanning, a skill's Evidence Card finished scoring, or the run is
-    over. Never a fabricated/simulated tick — see `verify_service.run_verification`
+    finished scanning, the run entered a new phase (e.g. "Scoring claimed
+    skills"), a skill's Evidence Card finished scoring, or the run is over.
+    Never a fabricated/simulated tick — see `verify_service.run_verification`
     and `github_client.GitHubClient.list_qualifying_commits`, the only two
     places that publish these."""
 
-    kind: str  # "scan" | "reveal" | "done"
-    detail: str  # repo full_name for "scan", skill name for "reveal", "" for "done"
+    kind: str  # "scan" | "phase" | "reveal" | "done"
+    detail: str  # repo full_name for "scan", phase description for "phase", skill name for "reveal", "" for "done"
 
 
 class ProgressBus:
