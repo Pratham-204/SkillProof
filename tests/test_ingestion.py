@@ -6,9 +6,13 @@ call, rather than finishing one repo before starting the next.
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from skillproof.github_client import GitHubClient, Repo
-from skillproof.ingestion import ingest_evidence
+from skillproof.ingestion import EvidenceItem, ingest_evidence
+from skillproof.taxonomy import DetectionPattern, ManifestPackage
+
+_NOW = datetime.now(timezone.utc)
 
 
 class _ConcurrencyTracker:
@@ -80,3 +84,38 @@ def test_ingest_evidence_fetches_manifests_across_repos_concurrently():
 
     assert set(bundle.manifests) == {r.full_name for r in repos}
     assert tracker.peak > 1
+
+
+def _commit(diff_text: str) -> EvidenceItem:
+    return EvidenceItem(
+        kind="commit",
+        repo="octodev/skillproof-lib",
+        ref="c1",
+        url="https://example.com/c1",
+        text="unrelated commit message",
+        date=_NOW,
+        diff_text=diff_text,
+    )
+
+
+def test_text_matches_rejects_aws_sdk_as_websockets_evidence():
+    """"ws" is a raw substring of "aws-sdk" -- a commit diff that merely touches
+    the (wholly unrelated) AWS SDK must not count toward WebSockets' Volume."""
+    pattern = DetectionPattern(manifest_packages=(ManifestPackage(ecosystem="npm", name="ws"),))
+
+    assert _commit("+const AWS = require('aws-sdk');").matches(pattern) is False
+
+
+def test_text_matches_still_detects_the_real_ws_package():
+    """Positive control for the fix above: a regression that makes the false
+    positive disappear by also killing the true positive would be worse than
+    the original bug."""
+    pattern = DetectionPattern(manifest_packages=(ManifestPackage(ecosystem="npm", name="ws"),))
+
+    assert _commit('+  "ws": "^8.0.0",').matches(pattern) is True
+
+
+def test_text_matches_rejects_react_native_as_react_evidence():
+    pattern = DetectionPattern(manifest_packages=(ManifestPackage(ecosystem="npm", name="react"),))
+
+    assert _commit('+  "react-native": "^0.72.0",').matches(pattern) is False

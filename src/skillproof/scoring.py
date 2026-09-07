@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from skillproof import embeddings, taxonomy
@@ -144,6 +145,16 @@ def _manifest_declares(manifests: dict[str, dict[str, str]], pattern: DetectionP
         return False
     for files in manifests.values():
         for content in files.values():
-            if any(pkg.name.lower() in content.lower() for pkg in pattern.manifest_packages):
+            if any(_package_name_matches(pkg.name, content) for pkg in pattern.manifest_packages):
                 return True
     return False
+
+
+def _package_name_matches(name: str, text: str) -> bool:
+    """A raw substring check lets an unrelated package that merely contains this
+    name (e.g. "ws" inside "aws-sdk") flip Presence for the wrong Skill Tag.
+    Plain \\b doesn't fix this: it treats '-' as a boundary too, so \\breact\\b
+    still matches inside "react-native" -- hence checking both edges against
+    this wider non-alphanumeric-non-hyphen set instead.
+    """
+    return re.search(rf"(?<![A-Za-z0-9-]){re.escape(name)}(?![A-Za-z0-9-])", text, re.IGNORECASE) is not None

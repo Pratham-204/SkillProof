@@ -146,6 +146,65 @@ def test_declared_only_when_manifest_lists_a_dependency_never_touched_by_a_commi
     assert result.confidence_score == 0.20
 
 
+def test_manifest_declares_rejects_aws_sdk_as_websockets_evidence():
+    """"ws" is a raw substring of "aws-sdk" -- the real WebSockets Skill Tag's
+    manifest_packages includes npm package "ws", and "aws-sdk" is an extremely
+    common, wholly unrelated npm dependency. A naive substring check flips
+    Presence for WebSockets purely from this collision."""
+    bundle = EvidenceBundle(
+        items=[],
+        manifests={"octodev/skillproof-lib": {"package.json": '{"dependencies": {"aws-sdk": "^2.1.0"}}'}},
+    )
+
+    result = scoring.score_skill(bundle, "WebSockets")
+
+    assert result.evidence_type == "none"
+    assert result.confidence_score == 0.0
+
+
+def test_manifest_declares_still_detects_the_real_ws_package():
+    """Positive control for the fix above: a regression that makes the false
+    positive disappear by also killing the true positive would be worse than
+    the original bug."""
+    bundle = EvidenceBundle(
+        items=[],
+        manifests={"octodev/skillproof-lib": {"package.json": '{"dependencies": {"ws": "^8.0.0"}}'}},
+    )
+
+    result = scoring.score_skill(bundle, "WebSockets")
+
+    assert result.evidence_type == "declared_only"
+    assert result.confidence_score == 0.20
+
+
+def test_manifest_declares_rejects_react_native_as_react_evidence():
+    """"react" (the React Skill Tag's manifest package) is a literal substring
+    of "react-native" (React Native's own npm package)."""
+    bundle = EvidenceBundle(
+        items=[],
+        manifests={"octodev/skillproof-lib": {"package.json": '{"dependencies": {"react-native": "^0.72.0"}}'}},
+    )
+
+    result = scoring.score_skill(bundle, "React")
+
+    assert result.evidence_type == "none"
+    assert result.confidence_score == 0.0
+
+
+def test_manifest_declares_rejects_node_sass_as_sass_evidence():
+    """"sass" (the Sass Skill Tag's manifest package) is a substring of the
+    still-common legacy package "node-sass"."""
+    bundle = EvidenceBundle(
+        items=[],
+        manifests={"octodev/skillproof-lib": {"package.json": '{"dependencies": {"node-sass": "^7.0.0"}}'}},
+    )
+
+    result = scoring.score_skill(bundle, "Sass")
+
+    assert result.evidence_type == "none"
+    assert result.confidence_score == 0.0
+
+
 def test_commit_message_mentioning_a_skill_does_not_count_toward_volume_on_its_own():
     """A commit message is freely candidate-authored prose, not evidence of code
     touched — only the diff content (or changed files) can make a commit match a

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -55,7 +56,17 @@ def _text_matches(text: str, pattern: DetectionPattern) -> bool:
     lower = text.lower()
     if any(marker.lower() in lower for marker in pattern.content_markers):
         return True
-    return any(pkg.name.lower() in lower for pkg in pattern.manifest_packages)
+    return any(_package_name_matches(pkg.name, text) for pkg in pattern.manifest_packages)
+
+
+def _package_name_matches(name: str, text: str) -> bool:
+    """A raw substring check lets an unrelated package that merely contains this
+    name (e.g. "ws" inside "aws-sdk") count a commit/PR-comment as evidence for
+    the wrong Skill Tag. Plain \\b doesn't fix this: it treats '-' as a boundary
+    too, so \\breact\\b still matches inside "react-native" -- hence checking
+    both edges against this wider non-alphanumeric-non-hyphen set instead.
+    """
+    return re.search(rf"(?<![A-Za-z0-9-]){re.escape(name)}(?![A-Za-z0-9-])", text, re.IGNORECASE) is not None
 
 
 @dataclass(frozen=True)
