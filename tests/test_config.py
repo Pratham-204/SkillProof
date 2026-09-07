@@ -84,11 +84,18 @@ def test_malformed_token_encryption_key_fails_fast_with_a_clear_error():
 
 
 def test_production_with_placeholder_github_credentials_fails_fast():
+    # github_client_id/secret pinned explicitly to the real placeholder
+    # defaults so this test is hermetic against whatever the developer's own
+    # local .env happens to have set for these — otherwise a real dev .env's
+    # values (which take precedence over the field default in pydantic-
+    # settings' resolution order) would silently mask the bug this guards.
     with pytest.raises(ValueError, match="GITHUB_CLIENT"):
         Settings(
             environment="production",
             token_encryption_key=_A_REAL_FERNET_KEY,
             database_url="postgresql+psycopg://user:pass@host:5432/railway",
+            github_client_id="dev-client-id",
+            github_client_secret="dev-client-secret",
         )
 
 

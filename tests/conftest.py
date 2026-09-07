@@ -1,8 +1,9 @@
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 import skillproof.models  # noqa: F401 - registers tables on Base.metadata
 from skillproof import embeddings, taxonomy
@@ -17,11 +18,25 @@ from skillproof.main import create_app
 
 @pytest.fixture
 def db_session_factory():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    # A bare `sqlite:///:memory:` + StaticPool (the previous setup) shares ONE
+    # raw sqlite3 connection across every Session, including ones created on
+    # different threads by concurrent request handling (e.g.
+    # test_explain_concurrent_requests_for_...). check_same_thread=False only
+    # lifts sqlite3's same-thread restriction — it does not make two Sessions'
+    # BEGIN/COMMIT sequences interleaving on that one physical connection
+    # safe, and empirically it isn't: genuinely concurrent threads hit
+    # "sqlite3.InterfaceError: bad parameter or other API misuse", spurious
+    # StaleDataErrors, and rows a just-committed write should have made
+    # visible reading back as missing, at a high, reproducible rate (11-19
+    # failures per 20 trials in a standalone repro). SQLite's own
+    # `cache=shared` URI mode instead gives each thread a genuinely separate
+    # connection that all still see the same in-memory data, coordinated by
+    # SQLite's own internal locking rather than by sharing one raw connection
+    # object — 0 failures in 70 repro trials. The db name must be unique per
+    # fixture instance so parallel/sequential tests don't leak into each
+    # other's shared-cache database.
+    db_name = f"file:memdb_{uuid.uuid4().hex}?mode=memory&cache=shared"
+    engine = create_engine(f"sqlite:///{db_name}", connect_args={"check_same_thread": False, "uri": True})
     Base.metadata.create_all(engine)
     yield sessionmaker(bind=engine, autoflush=False, autocommit=False)
     engine.dispose()
