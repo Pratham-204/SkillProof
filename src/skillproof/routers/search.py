@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -11,14 +13,25 @@ from skillproof.schemas import SearchMatchOut, SearchResponse, SearchResultOut
 router = APIRouter(tags=["search"])
 
 MAX_SEARCH_SKILLS = 8
+MAX_SKILL_LENGTH = 100
+
+# A safety valve, not a pagination boundary: keeps a pathologically large
+# candidate pool for one widely-claimed skill (potentially queried up to
+# MAX_SEARCH_SKILLS times per request) from being fully materialized into
+# Python with no bound before ranking and slicing to search_result_limit.
+MAX_QUALIFYING_CARDS_PER_SKILL = 10_000
 
 
 def _qualifying_cards_for_skill(db: Session, skill: str) -> dict[str, EvidenceCard]:
-    """Searchable, complete Evidence Cards for one skill, keyed by candidate_id.
+    """Searchable, complete, non-zero-evidence Evidence Cards for one skill,
+    keyed by candidate_id.
 
     A candidate can have more than one card for this skill across
     taxonomy_versions (ADR-0005/ticket 04); without this dedup, a re-verify
     under a bumped taxonomy_version would surface the same candidate twice.
+    evidence_type "none" is excluded: it means the candidate's GitHub activity
+    showed zero support for a skill they merely claimed, which must not count
+    as a qualifying match.
     """
     latest_per_candidate = (
         db.query(EvidenceCard.candidate_id, func.max(EvidenceCard.taxonomy_version).label("taxonomy_version"))
@@ -39,7 +52,9 @@ def _qualifying_cards_for_skill(db: Session, skill: str) -> dict[str, EvidenceCa
             Candidate.searchable.is_(True),
             EvidenceCard.skill == skill,
             EvidenceCard.status == "complete",
+            EvidenceCard.evidence_type != "none",
         )
+        .limit(MAX_QUALIFYING_CARDS_PER_SKILL)
         .all()
     )
     return {card.candidate_id: card for card in rows}
@@ -47,14 +62,19 @@ def _qualifying_cards_for_skill(db: Session, skill: str) -> dict[str, EvidenceCa
 
 @router.get("/search", response_model=SearchResponse)
 @limiter.limit(get_settings().search_rate_limit)
-def search(request: Request, skill: list[str] = Query(...), db: Session = Depends(get_db)) -> SearchResponse:
+def search(
+    request: Request,
+    skill: list[Annotated[str, Query(max_length=MAX_SKILL_LENGTH)]] = Query(...),
+    db: Session = Depends(get_db),
+) -> SearchResponse:
     """Unauthenticated, stateless, opt-in-only (issue 06). Rate limiting is
     enforced by the SlowAPI middleware wired in main.py.
 
     Multiple `skill` values are matched with AND semantics (ADR-0007): a
     candidate appears only if they have a qualifying card for every selected
-    skill. `declared_only` still counts as qualifying. Results are ranked by
-    the average Confidence Score across exactly the selected skills.
+    skill. `declared_only` still counts as qualifying; a zero-evidence "none"
+    card does not. Results are ranked by the average Confidence Score across
+    exactly the selected skills.
     """
     settings = get_settings()
 
@@ -88,7 +108,11 @@ def search(request: Request, skill: list[str] = Query(...), db: Session = Depend
             )
         )
 
-    results.sort(key=lambda r: r.average_score, reverse=True)
+    # candidate_ids is a Python set, so its iteration order (and thus any tie
+    # among candidates with equal average_score) is otherwise a function of
+    # per-process hash randomization — candidate_id as a secondary key makes
+    # the ranking reproducible for identical, unchanged data.
+    results.sort(key=lambda r: (-r.average_score, r.candidate_id))
     results = results[: settings.search_result_limit]
 
     return SearchResponse(skills=skills, results=results)

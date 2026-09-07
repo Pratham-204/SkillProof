@@ -515,9 +515,12 @@ def test_verify_with_revoked_token_prompts_reconnect(client, fake_github):
     client.post("/verify", json={"skills": ["FastAPI"]})
 
     body = client.get(f"/evidence-card/{candidate_id}").json()
+    # The reconnect signal a client acts on is the structured needs_reconnect
+    # flag, not the card's error text — the API boundary redacts that to a
+    # generic message regardless of cause (evidence_card.py, public/unauth'd).
     assert body["needs_reconnect"] is True
     assert body["cards"][0]["status"] == "failed"
-    assert "reconnect" in body["cards"][0]["error"].lower()
+    assert body["cards"][0]["error"] is not None
 
 
 def test_verify_with_undecryptable_token_prompts_reconnect(client, fake_github, db_session_factory):
@@ -550,7 +553,35 @@ def test_verify_with_undecryptable_token_prompts_reconnect(client, fake_github, 
     body = client.get(f"/evidence-card/{candidate_id}").json()
     assert body["needs_reconnect"] is True
     assert body["cards"][0]["status"] == "failed"
-    assert "reconnect" in body["cards"][0]["error"].lower()
+    assert body["cards"][0]["error"] is not None
+
+
+def test_evidence_card_redacts_raw_internal_detail_from_stored_error(client, fake_github, db_session_factory):
+    """GET /evidence-card is unauthenticated and fully public (ADR-0016). The
+    stored EvidenceCard.error can carry a raw str(exc) from verify_service.py's
+    defensive `except Exception` catch-alls — potentially file paths, hostnames,
+    or library internals. The API boundary must never echo that verbatim,
+    regardless of what ends up stored (i.e. this must hold even if the value
+    itself weren't already sanitized before being persisted)."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+    client.post("/verify", json={"skills": ["FastAPI"]})
+
+    leaked_detail = "OperationalError: connection to 'internal-db.railway.internal:5432' refused"
+    db = db_session_factory()
+    try:
+        card = db.query(EvidenceCard).filter_by(candidate_id=candidate_id, skill="FastAPI").one()
+        card.status = "failed"
+        card.error = f"Verification failed: {leaked_detail}"
+        db.commit()
+    finally:
+        db.close()
+
+    card = client.get(f"/evidence-card/{candidate_id}").json()["cards"][0]
+    assert card["status"] == "failed"
+    assert card["error"] is not None
+    assert leaked_detail not in card["error"]
+    assert "internal-db" not in card["error"]
 
 
 def test_a_skill_with_no_matching_evidence_is_unaffected_by_a_siblings_embeddings_failure(
@@ -788,6 +819,42 @@ def test_search_returns_only_opted_in_candidates_sorted_by_score(client, fake_gi
     assert direct.status_code == 200
 
 
+def test_search_excludes_a_zero_evidence_none_card(client, fake_github):
+    """A "none" card means the candidate's GitHub activity shows zero support
+    for a skill they merely claimed at /verify time (unlike "declared_only",
+    which requires an actual manifest listing) — the exact self-reported
+    resume line this product replaces (CONTEXT.md). It must not count as a
+    qualifying match, alone or as part of an AND query."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    _connect(client)
+    client.post("/verify", json={"skills": ["FastAPI", "Rust"], "searchable": True})
+
+    rust_only = client.get("/search?skill=Rust").json()["results"]
+    assert rust_only == []
+
+    combined = client.get("/search?skill=FastAPI&skill=Rust").json()["results"]
+    assert combined == []
+
+
+def test_search_breaks_average_score_ties_by_candidate_id(client, fake_github):
+    """Candidates tied on average_score previously sorted in whatever order
+    Python's `set` of candidate_ids happened to iterate in — a function of
+    per-process hash randomization, not any real ranking signal. Ranking must
+    be reproducible for identical, unchanged data."""
+    for i in range(5):
+        login, code = f"tiedcand{i}", f"code-{i}"
+        wire_verified_candidate(fake_github, login=login, github_user_id=100 + i, code=code)
+        _connect(client, login=login, github_user_id=100 + i, code=code)
+        client.post("/verify", json={"skills": ["Django"], "searchable": True})
+
+    results = client.get("/search?skill=Django").json()["results"]
+    assert len(results) == 5
+    assert len({r["average_score"] for r in results}) == 1  # genuinely tied
+
+    candidate_ids = [r["candidate_id"] for r in results]
+    assert candidate_ids == sorted(candidate_ids)
+
+
 def test_search_and_semantics_requires_every_selected_skill(client, fake_github):
     """AND semantics (ADR-0007): a candidate must have a qualifying card for
     every selected skill to appear. Django is manifest-declared but never
@@ -840,6 +907,14 @@ def test_search_rejects_more_than_eight_skills(client, fake_github):
     exactly_eight = "&".join(f"skill=Skill{i}" for i in range(8))
     response = client.get(f"/search?{exactly_eight}")
     assert response.status_code == 200
+
+
+def test_search_rejects_an_oversized_skill_value(client, fake_github):
+    """No application-level bound previously existed on an individual `skill`
+    value's length, so an oversized string was passed straight through as a
+    bound DB parameter on every request to this unauthenticated endpoint."""
+    response = client.get(f"/search?skill={'a' * 500}")
+    assert response.status_code == 422
 
 
 def test_search_deduplicates_a_repeated_skill_value(client, fake_github):

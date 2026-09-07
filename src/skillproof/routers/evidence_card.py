@@ -8,6 +8,13 @@ from skillproof.schemas import CandidateEvidenceOut, CandidateOut, EvidenceCardO
 
 router = APIRouter(tags=["evidence-card"])
 
+# This endpoint is public and unauthenticated (ADR-0016), so the stored
+# EvidenceCard.error is never echoed verbatim — verify_service.py's defensive
+# `except Exception` catch-alls can store a raw str(exc) that carries internal
+# detail (file paths, hostnames, library internals). Full detail is logged
+# server-side there instead.
+_PUBLIC_ERROR_MESSAGE = "Verification failed for this skill. Please try again later."
+
 
 @router.get("/evidence-card/{candidate_id}", response_model=CandidateEvidenceOut)
 def get_evidence_card(candidate_id: str, db: Session = Depends(get_db)) -> CandidateEvidenceOut:
@@ -50,7 +57,7 @@ def get_evidence_card(candidate_id: str, db: Session = Depends(get_db)) -> Candi
             EvidenceCardOut(
                 skill=c.skill,
                 status=c.status,
-                error=c.error,
+                error=(_PUBLIC_ERROR_MESSAGE if c.error is not None else None),
                 confidence_score=c.confidence_score,
                 evidence_type=c.evidence_type,
                 source_commits=[EvidenceRefOut(**ref) for ref in c.source_commits],
