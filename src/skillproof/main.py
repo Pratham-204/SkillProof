@@ -69,9 +69,20 @@ def create_app() -> FastAPI:
             """SPA fallback: serves a matching static file from dist/ (e.g.
             favicon.svg) if one exists, otherwise index.html so client-side
             routing (react-router) handles the path. Registered last, so every
-            API route above always wins for its own path first."""
-            candidate = FRONTEND_DIST / full_path
-            if full_path and candidate.is_file():
+            API route above always wins for its own path first.
+
+            Confirmed live, unauthenticated arbitrary-file-read otherwise:
+            `full_path` is Starlette's raw `{full_path:path}` capture, and
+            `FRONTEND_DIST / full_path` does not strip or normalize `..`
+            segments — `GET /../../.env` served the repo's real .env file
+            (in production: the GitHub OAuth secret, token-encryption key,
+            and DATABASE_URL) with a plain 200, no auth required. Resolving
+            the candidate path and checking it's actually still inside
+            FRONTEND_DIST closes this the same way Starlette's own
+            StaticFiles already guards its mounted paths.
+            """
+            candidate = (FRONTEND_DIST / full_path).resolve()
+            if full_path and candidate.is_relative_to(FRONTEND_DIST) and candidate.is_file():
                 return FileResponse(candidate)
             return FileResponse(FRONTEND_DIST / "index.html")
 
