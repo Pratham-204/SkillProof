@@ -152,7 +152,20 @@ def parse_pubspec(content: str) -> set[str]:
     return names
 
 
+# GitHub's contents API already refuses to hand back a manifest over 1MB (see
+# extract_declared_packages's docstring — content is None past that size), so this
+# is a defense-in-depth belt on top of that contract rather than the primary guard:
+# this is the one parser here that runs a full DOM-building XML parse (the others
+# are JSON/TOML/YAML/regex), and pom.xml content can come from external_repos —
+# repos the candidate doesn't own or control (see module docstring). Bundled expat
+# already blocks classic entity-expansion ("billion laughs") DoS on 3.11+, but
+# capping input size first means that protection is never load-bearing here.
+_MAX_POM_XML_BYTES = 1_000_000
+
+
 def parse_pom_xml(content: str) -> set[str]:
+    if len(content.encode("utf-8", errors="ignore")) > _MAX_POM_XML_BYTES:
+        return set()
     try:
         root = ElementTree.fromstring(content)
     except ElementTree.ParseError:
