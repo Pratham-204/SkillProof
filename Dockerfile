@@ -31,6 +31,16 @@ RUN groupadd --system --gid 1001 appuser \
 # install .` would instead copy the package into site-packages and break it.
 COPY pyproject.toml ./
 COPY src/ ./src/
+# CPU-only torch wheel before the app install: sentence-transformers pulls in
+# torch transitively, and an unconstrained `pip install` resolves the default
+# CUDA/GPU build (plus the full NVIDIA toolkit — cublas, cudnn, cusolver,
+# cufft, curand, cufile, nccl, triton, cuda-toolkit, ...). Railway's runtime
+# has no GPU and all-MiniLM-L6-v2 inference here is CPU-only, so that toolkit
+# is multiple GB of dead weight (verified: it alone accounted for 6.25GB of a
+# 9.66GB image via `docker history`). Installing the CPU wheel first from
+# PyTorch's own CPU index means the later `pip install -e .` finds torch
+# already satisfied and never reaches for the CUDA variant.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -e .
 
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
