@@ -24,10 +24,13 @@ logger = logging.getLogger(__name__)
 # found via list_merged_prs's search index can be deleted, renamed,
 # transferred, made private, or have the candidate's access revoked by the
 # time a later per-repo call reaches it; that must not abort every other
-# repo's already-gathered evidence for the whole /verify run. Anything else
-# (5xx, network errors) still propagates — those are more likely transient or
-# systemic and worth surfacing rather than silently swallowing.
-_SKIPPABLE_STATUSES = frozenset({404, 403})
+# repo's already-gathered evidence for the whole /verify run. 429 is included
+# because a still-rate-limited resource after _fetch_page's retries exhaust
+# raises exactly this status — that must degrade to "skip this one resource"
+# too, not crash the whole run. Anything else (5xx, network errors) still
+# propagates — those are more likely transient or systemic and worth
+# surfacing rather than silently swallowing.
+_SKIPPABLE_STATUSES = frozenset({404, 403, 429})
 
 # The well-known dependency-manifest filenames Presence checks against,
 # fetched once per repo (issue 02) rather than once per claimed skill.
@@ -609,9 +612,19 @@ def _backoff_seconds(response: httpx.Response, attempt: int) -> float:
     reset_at = response.headers.get("X-RateLimit-Reset")
     if reset_at and _is_primary_rate_limit(response):
         # X-RateLimit-Reset is the epoch second the primary limit's window
-        # rolls over — the exponential fallback below (capped at 60s) isn't
-        # long enough to clear a limit that can reset up to an hour out.
-        return max(float(reset_at) - time.time(), 1.0)
+        # rolls over, which can be up to an hour out — capped at 60s (same
+        # ceiling as the exponential fallback below) because this sleep runs
+        # while holding _rate_limit_gate, a lock shared by every GitHub
+        # request across the whole process (RealGitHubClient is a process-
+        # wide singleton), not just this one candidate's scan. An uncapped
+        # wait here was a real production incident: one candidate's primary
+        # rate limit froze GitHub connectivity for every concurrent scan on
+        # the server, indefinitely, with no user-visible error. If the limit
+        # genuinely hasn't reset after max_retries's worth of capped waits,
+        # the caller gives up and this request's status (403/429) is handled
+        # like any other failure — skipped per-repo (github_client.py's
+        # _SKIPPABLE_STATUSES) rather than hanging.
+        return min(max(float(reset_at) - time.time(), 1.0), 60.0)
     return min(2**attempt, 60)
 
 

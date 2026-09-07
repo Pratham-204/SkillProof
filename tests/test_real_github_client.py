@@ -539,6 +539,62 @@ def test_retries_on_primary_rate_limit_then_succeeds(monkeypatch):
     assert attempts["n"] == 2  # first attempt rate-limited, retried once rather than raising
 
 
+def test_primary_rate_limit_backoff_is_capped_even_when_reset_is_far_out():
+    """Real production incident: X-RateLimit-Reset can be up to an hour out,
+    and the old backoff computed that full wait uncapped. That sleep runs
+    while holding _rate_limit_gate — a lock shared by every GitHub request
+    across the whole process, since RealGitHubClient is a process-wide
+    singleton — so one candidate's primary rate limit froze GitHub
+    connectivity for every concurrent scan on the server, indefinitely, with
+    no error and no user-visible signal (this is what "stuck on Checking
+    dependency manifests" looks like from the candidate's side)."""
+    far_future_reset = str(int(time.time()) + 3000)  # 50 minutes out
+
+    response = httpx.Response(
+        403,
+        headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": far_future_reset},
+        json={"message": "API rate limit exceeded"},
+        request=httpx.Request("GET", "https://api.github.com/user"),
+    )
+
+    assert github_client._backoff_seconds(response, attempt=0) <= 60.0
+
+
+def test_a_persistently_rate_limited_manifest_file_is_skipped_within_bounded_time(monkeypatch):
+    """End-to-end: even if a resource stays primary-rate-limited across every
+    retry, the scan must give up within max_retries * the capped backoff and
+    skip just that file (task #1's containment), not hang. Uses a fake sleep
+    that raises after being called more times than max_retries could ever
+    need, so a regression back to the uncapped/unbounded wait would fail this
+    test by calling sleep excessively rather than by actually hanging."""
+    sleep_calls = {"n": 0}
+
+    def bounded_fake_sleep(seconds: float) -> None:
+        assert seconds <= 60.0
+        sleep_calls["n"] += 1
+        assert sleep_calls["n"] <= 10  # generous ceiling; max_retries=5 by default
+
+    monkeypatch.setattr(github_client.time, "sleep", bounded_fake_sleep)
+
+    far_future_reset = str(int(time.time()) + 3000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/requirements.txt"):
+            return httpx.Response(
+                403,
+                headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": far_future_reset},
+                json={"message": "API rate limit exceeded"},
+            )
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = _client(handler)
+
+    files = client.get_manifest_files("token", Repo(owner="octodev", name="skillproof-lib"))
+
+    assert files == {}  # the persistently-rate-limited file is skipped, not raised
+    assert sleep_calls["n"] > 0  # actually exercised the backoff path
+
+
 def test_get_manifest_files_checks_filenames_concurrently():
     """Manifest detection checks ~20 filenames per repo (github-scan-performance
     ticket 01). Each handler call sleeps briefly, so more than one request in
