@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -8,6 +10,21 @@ import httpx
 
 from skillproof.config import get_settings
 from skillproof.taxonomy import SkillTag
+
+
+# A registry package name that's long enough to be genuinely descriptive but
+# far past any real registry's own max length (npm/PyPI: ~214) — bounds how
+# much of a candidate-controlled manifest string reaches the LLM prompt.
+_MAX_PROMPT_PACKAGE_NAME_LENGTH = 100
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_for_prompt(text: str) -> str:
+    """Strips control characters and caps length before interpolating
+    attacker-controlled text into an LLM prompt. Not full prompt-injection
+    defense (unachievable against an LLM) — just bounds what obviously
+    shouldn't reach the prompt unsanitized (round 8 audit, B5)."""
+    return _CONTROL_CHARS_RE.sub("", text)[:_MAX_PROMPT_PACKAGE_NAME_LENGTH]
 
 
 class GroqUnavailableError(Exception):
@@ -70,9 +87,16 @@ class RealGroqClient(GroqClient):
             )
             response.raise_for_status()
             data = response.json()
-            content = data["choices"][0]["message"]["content"].strip()
+            content = data["choices"][0]["message"]["content"]
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
             raise GroqUnavailableError(str(exc)) from exc
+
+        if content is None:
+            # A refusal or a tool-call-only completion can return `content: null`
+            # with a 200 and no exception raised anywhere above (this actually
+            # happened in production, same as the empty-string case below).
+            raise GroqUnavailableError("Groq returned a null completion")
+        content = content.strip()
 
         if not content:
             # A reasoning model can spend its whole completion budget on hidden
@@ -92,6 +116,9 @@ class RealGroqClient(GroqClient):
         )
 
     def draft_skill_tag(self, package_name: str, ecosystem: str, existing_skills: list[SkillTag]) -> SkillTagDraft | None:
+        # package_name is candidate-controlled (a manifest dependency name) and
+        # goes straight into the prompt below — bound what reaches it (B5).
+        package_name = _sanitize_for_prompt(package_name)
         existing_text = "\n".join(f"- {s.name}: {s.description}" for s in existing_skills)
         prompt = (
             f"A package named '{package_name}' (ecosystem: {ecosystem}) has been declared as a "
@@ -141,9 +168,14 @@ class FakeGroqClient(GroqClient):
     draft_response: SkillTagDraft | None = None
     draft_should_fail: bool = False
     draft_calls: list[tuple[str, str]] = field(default_factory=list)
+    # Simulates a slow Groq call so a test can widen the race window for
+    # concurrent callers (e.g. two requests for the same not-yet-cached card).
+    delay_seconds: float = 0.0
 
     def generate_explanation(self, prompt: str) -> str:
         self.calls.append(prompt)
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
         if self.should_fail or self.canned_response is None:
             raise GroqUnavailableError("Fake Groq client configured to fail")
         return self.canned_response

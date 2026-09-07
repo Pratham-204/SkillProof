@@ -3,6 +3,7 @@ spec's testing decisions: one seam at the FastAPI boundary, GitHub and Groq
 faked with fixture/canned data, embeddings and scoring run for real.
 """
 
+import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
@@ -709,6 +710,50 @@ def test_explain_falls_back_then_retries_transparently(client, fake_github, fake
     retried = client.post(f"/explain/{candidate_id}/FastAPI")
     assert retried.json()["explanation_is_fallback"] is False
     assert retried.json()["explanation"] == fake_groq.canned_response
+
+
+def test_explain_concurrent_requests_for_the_same_card_only_call_groq_once(client, fake_github, fake_groq):
+    """N requests racing for the same not-yet-cached card (trivial for an
+    attacker to arrange with a parallel burst against one URL) must not each
+    independently trigger a real Groq call — only the first should, and the
+    rest should reuse its cached result (B4/D6)."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+    client.post("/verify", json={"skills": ["FastAPI"]})
+
+    fake_groq.delay_seconds = 0.5  # widens the race window so all requests overlap
+
+    responses: list = []
+    responses_lock = threading.Lock()
+
+    def _call():
+        response = client.post(f"/explain/{candidate_id}/FastAPI")
+        with responses_lock:
+            responses.append(response)
+
+    threads = [threading.Thread(target=_call) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(responses) == 5
+    assert all(r.status_code == 200 for r in responses)
+    assert all(r.json()["explanation"] == fake_groq.canned_response for r in responses)
+    assert len(fake_groq.calls) == 1
+
+
+def test_explain_is_rate_limited_per_ip(client, fake_github):
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+    client.post("/verify", json={"skills": ["FastAPI"]})
+
+    for _ in range(20):
+        response = client.post(f"/explain/{candidate_id}/FastAPI")
+        assert response.status_code == 200
+
+    throttled = client.post(f"/explain/{candidate_id}/FastAPI")
+    assert throttled.status_code == 429
 
 
 def test_search_returns_only_opted_in_candidates_sorted_by_score(client, fake_github):
