@@ -9,6 +9,7 @@ real network transport), so these tests drive it directly with
 """
 
 import base64
+import logging
 import threading
 import time
 
@@ -108,6 +109,36 @@ def test_list_owned_repos_falls_back_to_public_only_without_repo_scope():
     assert [(r.name, r.private) for r in repos] == [("public-app", False)]
 
 
+def test_list_owned_repos_does_not_fall_back_on_a_mid_pagination_error():
+    """The public-only fallback exists for a token that lacks the repo OAuth
+    scope, which fails immediately on page 1 of /user/repos. A transient error
+    on page 2+ — after page 1 already proved this token DOES have scope
+    access — must propagate instead of being silently downgraded to a
+    public-only, private-repo-free result for the whole /verify run."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/repos":
+            if request.url.params.get("page") == "2":
+                return httpx.Response(502, text="Bad Gateway")
+            return httpx.Response(
+                200,
+                json=[{"owner": {"login": "octodev"}, "name": "repo-a", "fork": False, "private": True}],
+                headers={
+                    "Link": '<https://api.github.com/user/repos?affiliation=owner&per_page=100&page=2>; rel="next"'
+                },
+            )
+        if request.url.path == "/users/octodev/repos":
+            # Only reached if the (buggy) fallback fires; a real fallback
+            # response here would mask the bug behind a passing test.
+            return httpx.Response(200, json=[{"owner": {"login": "octodev"}, "name": "repo-a", "fork": False}])
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = _client(handler)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.list_owned_repos("token", "octodev")
+
+
 def test_list_merged_prs_follows_pagination_on_the_search_endpoint():
     """The search API wraps results in {"items": [...]} rather than a bare
     array, but still paginates via the same Link header — must aggregate too."""
@@ -174,6 +205,38 @@ def test_list_pr_review_comments_follows_link_header_pagination():
     assert {c.comment_id for c in comments} == {1, 2}
 
 
+def test_get_all_pages_logs_a_warning_when_max_pages_is_exhausted(caplog):
+    """Any paginated caller relying on the max_pages safety cap must not
+    silently truncate results with zero signal — list_pr_review_comments (bug
+    3c: oldest-first across the whole repo, so a candidate's own recent
+    comments are what gets dropped) and _fetch_owned_commits (bug 3d:
+    newest-first, so the dropped tail is the oldest/Span-relevant commits)
+    both hit this same cap. One shared check in _get_all_pages covers both."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page") or "1")
+        return httpx.Response(
+            200,
+            json=[{"id": page}],
+            headers={
+                "Link": (
+                    "<https://api.github.com/repos/octodev/big-repo/pulls/comments"
+                    f'?per_page=100&page={page + 1}>; rel="next"'
+                )
+            },
+        )
+
+    client = _client(handler)
+
+    with caplog.at_level(logging.WARNING):
+        results = client._get_all_pages(
+            "token", "/repos/octodev/big-repo/pulls/comments", params={"per_page": 100}, max_pages=3
+        )
+
+    assert len(results) == 3  # capped, not the endless pages the fake Link header offers
+    assert any("max_pages" in record.message for record in caplog.records)
+
+
 def test_list_pr_review_comments_skips_deleted_account_comments_without_crashing():
     """GitHub returns "user": null (not a missing key) for a comment whose author's
     account has since been deleted — a real, occasionally-hit case, not a fixture
@@ -217,6 +280,31 @@ def test_get_authenticated_user_raises_on_revoked_token():
         client.get_authenticated_user("revoked-token")
 
 
+def test_follows_a_redirect_instead_of_misreading_the_redirect_body_as_data():
+    """A repo renamed/transferred to a new owner answers the old owner/name
+    path with a 301, not the resource. Without follow_redirects, GitHub's tiny
+    redirect payload ({"message": "Moved Permanently", ...}) was returned as
+    if it were the real resource — a confusing KeyError deep in a caller
+    instead of a clean, catchable error."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/oldowner/oldname/commits/abc123":
+            return httpx.Response(
+                301,
+                headers={"Location": "https://api.github.com/repos/newowner/newname/commits/abc123"},
+                json={"message": "Moved Permanently", "url": "https://api.github.com/repos/newowner/newname/commits/abc123"},
+            )
+        if request.url.path == "/repos/newowner/newname/commits/abc123":
+            return httpx.Response(200, json={"sha": "abc123", "commit": {"message": "real commit"}})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = _client(handler)
+
+    body = client._get_json("token", "/repos/oldowner/oldname/commits/abc123")
+
+    assert body == {"sha": "abc123", "commit": {"message": "real commit"}}
+
+
 def test_repeated_call_reuses_cached_body_on_304():
     """A 304 response (matched ETag) must return the previously cached body, not
     fail on a missing body — the etag caching path was completely untested."""
@@ -235,6 +323,41 @@ def test_repeated_call_reuses_cached_body_on_304():
 
     assert first.id == 1
     assert second.id == 1  # served from the ETag cache, not a fresh id=2 fetch
+
+
+def test_pagination_continues_past_a_304_on_a_cached_first_page():
+    """The ETag cache only stored (etag, body) — never the Link header. On a
+    re-verify where the first page comes back 304, _get_all_pages evaluated
+    the FRESH 304 response's Link header (typically absent) instead of the
+    original 200's, silently stopping pagination after just page 1."""
+    etag = 'W/"abc123"'
+    page2_hits = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "2":
+            page2_hits["n"] += 1
+            return httpx.Response(
+                200, json=[{"owner": {"login": "octodev"}, "name": "repo-b", "fork": False, "private": False}]
+            )
+        if request.headers.get("If-None-Match") == etag:
+            return httpx.Response(304)
+        return httpx.Response(
+            200,
+            json=[{"owner": {"login": "octodev"}, "name": "repo-a", "fork": False, "private": False}],
+            headers={
+                "ETag": etag,
+                "Link": '<https://api.github.com/user/repos?affiliation=owner&per_page=100&page=2>; rel="next"',
+            },
+        )
+
+    client = _client(handler)
+
+    first = client.list_owned_repos("token", "octodev")
+    second = client.list_owned_repos("token", "octodev")  # first page now served from the ETag cache (304)
+
+    assert {r.name for r in first} == {"repo-a", "repo-b"}
+    assert {r.name for r in second} == {"repo-a", "repo-b"}
+    assert page2_hits["n"] == 2
 
 
 def test_list_qualifying_commits_treats_409_empty_repo_as_zero_commits():
@@ -391,6 +514,31 @@ def test_get_manifest_files_retries_on_secondary_rate_limit_then_succeeds(monkey
     assert attempts["requirements.txt"] == 2  # first call rate-limited, retried once
 
 
+def test_retries_on_primary_rate_limit_then_succeeds(monkeypatch):
+    """GitHub's PRIMARY rate limit (5000 req/hr) returns 403 with
+    X-RateLimit-Remaining: 0 and neither a Retry-After header nor "secondary
+    rate limit"/"abuse detection" body text — previously falling straight
+    through to raise_for_status with zero retry, despite the backoff/retry
+    machinery right above already existing for the secondary-limit case."""
+    monkeypatch.setattr(github_client.time, "sleep", lambda seconds: None)
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(
+                403, headers={"X-RateLimit-Remaining": "0"}, json={"message": "API rate limit exceeded"}
+            )
+        return httpx.Response(200, json={"id": 1, "login": "octodev"})
+
+    client = _client(handler)
+
+    user = client.get_authenticated_user("token")
+
+    assert user.login == "octodev"
+    assert attempts["n"] == 2  # first attempt rate-limited, retried once rather than raising
+
+
 def test_get_manifest_files_checks_filenames_concurrently():
     """Manifest detection checks ~20 filenames per repo (github-scan-performance
     ticket 01). Each handler call sleeps briefly, so more than one request in
@@ -449,6 +597,42 @@ def test_commit_detail_fetch_runs_concurrently():
 
     assert len(commits) == 5
     assert tracker.peak > 1
+
+
+def test_commit_record_logs_a_warning_when_files_array_hits_the_300_cap(caplog):
+    """/repos/{owner}/{repo}/commits/{sha} paginates its "files" array past 300
+    entries via Link headers that _get_json never follows — a commit touching
+    300+ files silently has its files/diff_text built from only the first
+    300. Exactly 300 is the strong signal of truncation (GitHub always caps
+    at exactly 300 per page for this field)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/repos":
+            return httpx.Response(
+                200, json=[{"owner": {"login": "octodev"}, "name": "repo-a", "fork": False, "private": False}]
+            )
+        if request.url.path == "/search/issues":
+            return httpx.Response(200, json={"items": []})
+        if request.url.path == "/repos/octodev/repo-a/commits":
+            return httpx.Response(200, json=[{"sha": "bigsha"}])
+        if request.url.path == "/repos/octodev/repo-a/commits/bigsha":
+            return httpx.Response(
+                200,
+                json={
+                    "commit": {"message": "msg", "author": {"date": "2024-01-01T00:00:00Z"}},
+                    "files": [{"filename": f"f{i}.py"} for i in range(300)],
+                    "html_url": "https://github.com/octodev/repo-a/commit/bigsha",
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = _client(handler)
+
+    with caplog.at_level(logging.WARNING):
+        commits = client.list_qualifying_commits("token", "octodev")
+
+    assert len(commits[0].files) == 300
+    assert any("300" in record.message for record in caplog.records)
 
 
 def test_repos_are_processed_concurrently():

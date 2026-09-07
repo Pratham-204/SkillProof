@@ -245,9 +245,14 @@ class RealGitHubClient(GitHubClient):
         settings = get_settings()
         self._client_id = client_id or settings.github_client_id
         self._client_secret = client_secret or settings.github_client_secret
-        self._etag_cache: dict[str, tuple[str, object]] = {}
+        self._etag_cache: dict[str, tuple[str, object, dict]] = {}
         self._etag_lock = threading.Lock()
-        self._client = httpx.Client(transport=transport, timeout=15)
+        # follow_redirects: a renamed/transferred repo answers at its old path with
+        # a 301/302 instead of the resource. Without this, raise_for_status() (which
+        # doesn't fire for a 3xx) lets the tiny redirect payload through as if it
+        # were real data. GitHub's redirects are same-origin with the same auth
+        # semantics, so following them is safe.
+        self._client = httpx.Client(transport=transport, timeout=15, follow_redirects=True)
 
         # Shared for this client's whole lifetime (github-scan-performance
         # tickets 01/03), not recreated per call — and note `deps.get_github_client`
@@ -312,14 +317,27 @@ class RealGitHubClient(GitHubClient):
             data = self._get_all_pages(
                 token, "/user/repos", params={"visibility": "all", "affiliation": "owner", "per_page": 100}
             )
-            return [
-                Repo(owner=r["owner"]["login"], name=r["name"], fork=r["fork"], private=r["private"])
-                for r in data
-                if not r["fork"]
-            ]
-        except httpx.HTTPStatusError:
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            # A scope-denial fails immediately on page 1 — never mid-pagination on
+            # page 2+, which is far more likely a transient error (502/504, a
+            # primary rate limit) that must propagate rather than silently
+            # downgrade a candidate with private repos to a public-only result.
+            is_first_page = exc.response.request.url.params.get("page") in (None, "1")
+            if status not in (403, 404) or not is_first_page:
+                raise
+            logger.warning(
+                "Falling back to public-only repo listing for %s: /user/repos returned %s on the first page",
+                login,
+                status,
+            )
             data = self._get_all_pages(token, f"/users/{login}/repos", params={"type": "owner", "per_page": 100})
             return [Repo(owner=r["owner"]["login"], name=r["name"], fork=r["fork"]) for r in data if not r["fork"]]
+        return [
+            Repo(owner=r["owner"]["login"], name=r["name"], fork=r["fork"], private=r["private"])
+            for r in data
+            if not r["fork"]
+        ]
 
     def list_merged_prs(self, token: str, login: str) -> list[MergedPullRequest]:
         data = self._get_all_pages(
@@ -391,8 +409,14 @@ class RealGitHubClient(GitHubClient):
 
     def _commit_record(self, token: str, repo: Repo, sha: str) -> CommitRecord:
         detail = self._get_json(token, f"/repos/{repo.full_name}/commits/{sha}")
-        files = [f["filename"] for f in detail.get("files", [])]
-        diff_text = "\n".join(f.get("patch", "") for f in detail.get("files", []) if f.get("patch"))
+        files_data = detail.get("files", [])
+        if len(files_data) == 300:
+            # This endpoint's "files" array paginates past 300 entries via Link
+            # headers that _get_json never follows — 300 exactly is the strong
+            # signal of truncation (GitHub always caps at exactly 300 per page).
+            logger.warning("Commit %s in %s has exactly 300 files; files/diff may be truncated", sha, repo.full_name)
+        files = [f["filename"] for f in files_data]
+        diff_text = "\n".join(f.get("patch", "") for f in files_data if f.get("patch"))
         return CommitRecord(
             repo=repo,
             sha=sha,
@@ -488,23 +512,30 @@ class RealGitHubClient(GitHubClient):
         the bug this method replaces. Handles both a bare JSON array and the GitHub
         search API's `{"items": [...]}` shape, flattening either into one list.
         `max_pages` is a safety net against a malformed/cyclical Link header, the
-        same defensive bound `_fetch_page`'s own retry loop already applies.
+        same defensive bound `_fetch_page`'s own retry loop already applies — but a
+        legitimately larger result set (e.g. list_pr_review_comments on a repo with
+        10,000+ comments, or an owned repo with 10,000+ commits) hits it too, so
+        exhausting it is logged rather than silently truncating every such caller.
         """
         url: str | None = f"https://api.github.com{path}"
         results: list = []
         for _ in range(max_pages):
             if url is None:
                 break
-            body, response = self._fetch_page(token, url, params)
+            body, links = self._fetch_page(token, url, params)
             results.extend(body["items"] if isinstance(body, dict) else body)
-            url = response.links.get("next", {}).get("url")
+            url = links.get("next", {}).get("url")
             params = None  # the next-page URL already carries the full query string
+        if url is not None:
+            logger.warning("Pagination stopped after max_pages=%s for %s; results are truncated", max_pages, path)
         return results
 
     def _fetch_page(self, token: str, url: str, params: dict | None, max_retries: int = 5):
-        """One page: handles auth errors, secondary-rate-limit backoff, and ETag
-        caching. Returns `(body, response)` — callers needing the next-page Link
-        header (`_get_all_pages`) read it off `response.links`.
+        """One page: handles auth errors, rate-limit backoff, and ETag caching.
+        Returns `(body, links)` — `links` is `response.links`-shaped (e.g.
+        `links["next"]["url"]`), the next-page Link header info `_get_all_pages`
+        needs, sourced from the cache on a 304 since GitHub doesn't necessarily
+        repeat the original 200's Link header on a not-modified response.
 
         Runs concurrently from multiple threads once a scan is parallelized
         (tickets 01/03), so both the ETag cache and rate-limit backoff below are
@@ -513,7 +544,7 @@ class RealGitHubClient(GitHubClient):
         cache_key = f"{url}?{params}"
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         with self._etag_lock:
-            cached_etag, cached_body = self._etag_cache.get(cache_key, (None, None))
+            cached_etag, cached_body, cached_links = self._etag_cache.get(cache_key, (None, None, None))
         if cached_etag:
             headers["If-None-Match"] = cached_etag
 
@@ -526,10 +557,10 @@ class RealGitHubClient(GitHubClient):
                 pass
             response = self._client.get(url, headers=headers, params=params)
             if response.status_code == 304 and cached_body is not None:
-                return cached_body, response
+                return cached_body, cached_links or {}
             if response.status_code == 401:
                 raise GitHubAuthError("GitHub token is invalid or has been revoked")
-            if response.status_code == 403 and _is_secondary_rate_limit(response) and attempt < max_retries:
+            if response.status_code in (403, 429) and _is_rate_limited(response) and attempt < max_retries:
                 with self._rate_limit_gate:
                     time.sleep(_backoff_seconds(response, attempt))
                 attempt += 1
@@ -539,8 +570,8 @@ class RealGitHubClient(GitHubClient):
             etag = response.headers.get("ETag")
             if etag:
                 with self._etag_lock:
-                    self._etag_cache[cache_key] = (etag, body)
-            return body, response
+                    self._etag_cache[cache_key] = (etag, body, response.links)
+            return body, response.links
 
 
 def _append_unique(commits: list[CommitRecord], seen: set[tuple[str, str]], commit: CommitRecord) -> None:
@@ -560,10 +591,27 @@ def _is_secondary_rate_limit(response: httpx.Response) -> bool:
     return "secondary rate limit" in body_text or "abuse detection" in body_text
 
 
+def _is_primary_rate_limit(response: httpx.Response) -> bool:
+    # GitHub's primary limit (5000 req/hr authenticated) carries neither a
+    # Retry-After header nor "secondary rate limit"/"abuse detection" body text —
+    # this is the only signal that distinguishes it from a genuine 403/429.
+    return response.headers.get("X-RateLimit-Remaining") == "0"
+
+
+def _is_rate_limited(response: httpx.Response) -> bool:
+    return _is_secondary_rate_limit(response) or _is_primary_rate_limit(response)
+
+
 def _backoff_seconds(response: httpx.Response, attempt: int) -> float:
     retry_after = response.headers.get("Retry-After")
     if retry_after:
         return float(retry_after)
+    reset_at = response.headers.get("X-RateLimit-Reset")
+    if reset_at and _is_primary_rate_limit(response):
+        # X-RateLimit-Reset is the epoch second the primary limit's window
+        # rolls over — the exponential fallback below (capped at 60s) isn't
+        # long enough to clear a limit that can reset up to an hour out.
+        return max(float(reset_at) - time.time(), 1.0)
     return min(2**attempt, 60)
 
 
