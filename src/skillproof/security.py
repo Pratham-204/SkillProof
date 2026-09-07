@@ -13,6 +13,10 @@ def generate_session_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def generate_oauth_state() -> str:
+    return secrets.token_urlsafe(32)
+
+
 def _fernet() -> Fernet:
     return Fernet(get_settings().token_encryption_key.encode())
 

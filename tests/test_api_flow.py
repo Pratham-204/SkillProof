@@ -4,6 +4,7 @@ faked with fixture/canned data, embeddings and scoring run for real.
 """
 
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -20,11 +21,30 @@ from tests.fixtures.github_fixtures import (
 )
 
 
+def _login_state(client) -> str:
+    """Drives /login and returns the state value it embedded in the authorize
+    URL (and set as a matching cookie on `client`) — the same value callback()
+    now requires. A shared helper for tests that call /callback directly
+    (rather than through _connect) to exercise a specific callback edge case."""
+    login_response = client.get("/auth/github/login", follow_redirects=False)
+    assert login_response.status_code in (302, 307)
+    return parse_qs(urlparse(login_response.headers["location"]).query)["state"][0]
+
+
 def _connect(client, *, login="octodev", github_user_id=42, code="test-code") -> dict:
     """Drives the OAuth callback (which now redirects and sets a session cookie,
     ADR-0006) then reads the resulting identity back via /auth/github/me, so
-    callers get the same {candidate_id, github_login, ...} shape as before."""
-    response = client.get(f"/auth/github/callback?code={code}", follow_redirects=False)
+    callers get the same {candidate_id, github_login, ...} shape as before.
+
+    Goes through /login first, not straight to /callback: login() now sets a
+    state cookie and embeds the same value in the authorize URL it redirects
+    to, and callback() requires both to match (the OAuth login-CSRF fix) — a
+    bare /callback call with no preceding /login has no state cookie at all
+    and would be silently bounced back without ever creating a session.
+    """
+    state = _login_state(client)
+
+    response = client.get(f"/auth/github/callback?code={code}&state={state}", follow_redirects=False)
     assert response.status_code in (302, 307)
 
     me = client.get("/auth/github/me")
@@ -49,8 +69,9 @@ def test_session_cookie_persists_beyond_the_browser_session(client, fake_github)
     logged out on ordinary browser behavior (closing the browser), not just an
     actual sign-out. See config.py's `session_max_age_days`."""
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    state = _login_state(client)
 
-    response = client.get("/auth/github/callback?code=test-code", follow_redirects=False)
+    response = client.get(f"/auth/github/callback?code=test-code&state={state}", follow_redirects=False)
 
     set_cookie = response.headers["set-cookie"]
     assert "Max-Age=2592000" in set_cookie  # 30 days, in seconds
@@ -124,8 +145,9 @@ def test_reused_oauth_code_redirects_instead_of_crashing(client, fake_github):
     clean retry path — this must redirect back into the app instead, where
     "Connect GitHub Account" is safe to click again with a fresh code."""
     fake_github.invalid_codes.add("reused-code")
+    state = _login_state(client)
 
-    response = client.get("/auth/github/callback?code=reused-code", follow_redirects=False)
+    response = client.get(f"/auth/github/callback?code=reused-code&state={state}", follow_redirects=False)
 
     assert response.status_code in (302, 307)
 
@@ -134,10 +156,54 @@ def test_first_login_with_no_existing_session_cookie_succeeds(client, fake_githu
     """No session cookie exists on a brand-new browser's first login — the
     cleanup step must be a no-op here, not an error."""
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    state = _login_state(client)
 
-    response = client.get("/auth/github/callback?code=test-code", follow_redirects=False)
+    response = client.get(f"/auth/github/callback?code=test-code&state={state}", follow_redirects=False)
 
     assert response.status_code in (302, 307)
+
+
+def test_login_embeds_a_state_value_and_sets_a_matching_cookie(client):
+    response = client.get("/auth/github/login", follow_redirects=False)
+
+    assert response.status_code in (302, 307)
+    state = parse_qs(urlparse(response.headers["location"]).query)["state"][0]
+    assert len(state) > 20  # a real random token, not a placeholder
+    assert client.cookies.get("skillproof_oauth_state") == state
+
+
+def test_callback_rejects_a_code_with_no_preceding_login(client, fake_github):
+    """The exact OAuth login-CSRF this protects against: a request that
+    reached /callback without ever going through this browser's own /login
+    (an attacker-supplied link with the attacker's own leftover code) must
+    not be able to exchange that code and plant a session — there is no
+    state cookie on this client at all to satisfy the check."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+
+    response = client.get(
+        "/auth/github/callback?code=test-code&state=attacker-supplied-state", follow_redirects=False
+    )
+
+    assert response.status_code in (302, 307)
+    assert "session" not in response.headers.get("set-cookie", "").lower()
+    me = client.get("/auth/github/me")
+    assert me.status_code == 401
+
+
+def test_callback_rejects_a_state_that_does_not_match_the_cookie(client, fake_github):
+    """A state cookie IS present (a real /login happened) but the state query
+    param doesn't match it — tampered/forged, or a state from a different,
+    concurrent login attempt. Must not exchange the code either."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    _login_state(client)  # sets a real state cookie, but we deliberately don't use its value below
+
+    response = client.get(
+        "/auth/github/callback?code=test-code&state=a-different-state-value", follow_redirects=False
+    )
+
+    assert response.status_code in (302, 307)
+    me = client.get("/auth/github/me")
+    assert me.status_code == 401
 
 
 def test_toggle_searchable_updates_and_persists(client, fake_github):

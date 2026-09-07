@@ -1,5 +1,7 @@
 """Round 8 (ADR-0008): recording raw material for the self-extending taxonomy."""
 
+from urllib.parse import parse_qs, urlparse
+
 from skillproof import manifest_parsing
 from skillproof.models import Candidate, Sighting
 from skillproof.sightings import record_sightings
@@ -7,7 +9,14 @@ from tests.fixtures.github_fixtures import wire_verified_candidate
 
 
 def _connect(client, *, login="octodev", github_user_id=42, code="test-code") -> dict:
-    response = client.get(f"/auth/github/callback?code={code}", follow_redirects=False)
+    # Goes through /login first so callback()'s OAuth-state CSRF check has a
+    # matching cookie to validate against — see test_api_flow.py's own
+    # _connect for the full rationale (this is a duplicate helper, not shared).
+    login_response = client.get("/auth/github/login", follow_redirects=False)
+    assert login_response.status_code in (302, 307)
+    state = parse_qs(urlparse(login_response.headers["location"]).query)["state"][0]
+
+    response = client.get(f"/auth/github/callback?code={code}&state={state}", follow_redirects=False)
     assert response.status_code in (302, 307)
     me = client.get("/auth/github/me")
     assert me.status_code == 200

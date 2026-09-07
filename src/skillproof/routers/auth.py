@@ -1,3 +1,5 @@
+import secrets
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
@@ -12,22 +14,52 @@ from skillproof.schemas import CandidateOut, SearchableUpdate
 
 router = APIRouter(prefix="/auth/github", tags=["auth"])
 
+# Short-lived: only needs to survive one round trip through GitHub's own
+# consent screen, never a returning session.
+OAUTH_STATE_COOKIE_NAME = "skillproof_oauth_state"
+OAUTH_STATE_MAX_AGE_SECONDS = 600
+
 
 @router.get("/login")
 def login() -> RedirectResponse:
+    """Generates a fresh, unguessable `state` value per login attempt and
+    carries it two ways: appended to GitHub's authorize URL, and in a
+    short-lived cookie on this browser. callback() below requires both to
+    match before it trusts a `code` — without this, nothing bound the
+    callback's code-exchange to the browser/session that actually initiated
+    the login (classic OAuth login-CSRF): an attacker who captures their own
+    still-valid `code` could lure a victim into GET /auth/github/callback?
+    code=<attacker's code>, and the victim's browser would silently end up
+    holding a session cookie authenticated as the ATTACKER's GitHub identity
+    — SameSite=Lax does not block this, since it's a plain top-level GET
+    navigation, exactly the case Lax carves out as allowed.
+    """
     settings = get_settings()
+    state = security.generate_oauth_state()
     url = (
         "https://github.com/login/oauth/authorize"
         f"?client_id={settings.github_client_id}"
         f"&redirect_uri={settings.github_oauth_redirect_uri}"
         f"&scope={settings.github_oauth_scope}"
+        f"&state={state}"
     )
-    return RedirectResponse(url)
+    response = RedirectResponse(url)
+    response.set_cookie(
+        key=OAUTH_STATE_COOKIE_NAME,
+        value=state,
+        httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite="lax",
+        path="/",
+        max_age=OAUTH_STATE_MAX_AGE_SECONDS,
+    )
+    return response
 
 
 @router.get("/callback")
 def callback(
     code: str,
+    state: str,
     request: Request,
     db: Session = Depends(get_db),
     github_client: GitHubClient = Depends(get_github_client),
@@ -46,6 +78,21 @@ def callback(
     candidate_id is intentionally public.
     """
     settings = get_settings()
+
+    # `state` must both be present (FastAPI 422s a request missing the query
+    # param entirely — fails closed for the simplest attack, a bare crafted
+    # link with no state at all) and match what login() set on THIS browser.
+    # secrets.compare_digest avoids a timing side-channel on the comparison
+    # itself; a mismatch (or no cookie at all — e.g. it expired, or this
+    # callback was never preceded by our own /login) is treated exactly like
+    # the already-consumed-code case below: bounce back into the app rather
+    # than exchange a code nothing has vouched for.
+    cookie_state = request.cookies.get(OAUTH_STATE_COOKIE_NAME)
+    if not cookie_state or not secrets.compare_digest(cookie_state, state):
+        response = RedirectResponse(settings.github_oauth_success_redirect)
+        response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+        return response
+
     try:
         token = github_client.exchange_code_for_token(code)
         user = github_client.get_authenticated_user(token)
@@ -56,7 +103,9 @@ def callback(
         # otherwise surface as a raw 500. Send the Candidate back into the app
         # instead, where "Connect GitHub Account" is safe to click again with a
         # fresh code.
-        return RedirectResponse(settings.github_oauth_success_redirect)
+        response = RedirectResponse(settings.github_oauth_success_redirect)
+        response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+        return response
 
     candidate = db.query(Candidate).filter_by(github_user_id=user.id).one_or_none()
     if candidate is None:
@@ -91,6 +140,7 @@ def callback(
         path="/",
         max_age=settings.session_max_age_days * 24 * 60 * 60,
     )
+    response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")  # single-use, spent on this exchange
     return response
 
 
