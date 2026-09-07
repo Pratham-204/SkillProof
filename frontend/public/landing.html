@@ -242,6 +242,21 @@
   .diff .add{ background:var(--diff-add-bg); color:var(--diff-add); }
   .diff .ctx{ color:var(--ink-faint); }
 
+  /* ---------- hunter card teaser (aggregate profile, not a per-skill card) ---------- */
+  .hc-card{ padding:24px; }
+  .hc-avatar{
+    width:44px; height:44px; border-radius:50%; flex:none;
+    background:radial-gradient(120% 120% at 30% 25%, color-mix(in srgb, var(--accent) 40%, var(--surface-2)), var(--surface-2));
+    box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+  .hc-stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:18px; padding-top:16px; border-top:1px solid var(--edge); text-align:center; }
+  .hc-stat .n{ font-family:"Rajdhani"; font-weight:700; font-size:1.25rem; color:var(--accent-strong); }
+  .hc-stat .l{ font-size:.66rem; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.04em; margin-top:2px; }
+  .hc-trophies{ margin-top:18px; }
+  .hc-trophy-list{ list-style:none; margin:8px 0 0; padding:0; display:flex; flex-direction:column; gap:6px; font-size:.84rem; color:var(--ink-soft); }
+  .hc-trophy-list li{ display:flex; align-items:center; gap:8px; }
+  .hc-dot{ width:6px; height:6px; background:var(--accent); transform:rotate(45deg); flex:none; }
+
   /* future / roadmap section — the system's one gold accent, reserved for
      what's not built yet, distinct from the cyan "live" system elsewhere */
   .future-wrap{ background:var(--surface); border-top:1px solid var(--edge); border-bottom:1px solid var(--edge); }
@@ -286,6 +301,7 @@
       <a href="#how">How it works</a>
       <a href="#signals">Signals</a>
       <a href="#demo">Demo</a>
+      <a href="#hunter-card">Hunter Card</a>
       <a href="#roadmap">Roadmap</a>
     </nav>
     <a class="btn btn-primary" href="/auth/github/login">Connect GitHub</a>
@@ -435,6 +451,57 @@
     </div>
   </section>
 
+  <section class="beat" id="hunter-card">
+    <div class="beat-rail"><span class="dot"></span></div>
+    <div>
+      <span class="kicker">your profile</span>
+      <h2 class="beat-title">One Hunter Card for your whole track record</h2>
+      <p class="beat-lede">Claiming more than one skill? Every complete Evidence Card rolls up into a single Hunter Card &mdash; an overall Rank averaged across them, real totals pulled straight from that same evidence, a Trophy Cabinet of badges you actually earned, and a PNG you can download and put anywhere.</p>
+
+      <div class="demo-grid">
+        <div>
+          <div class="tags">
+            <span class="tag">Averaged rank</span>
+            <span class="tag">Real summary stats</span>
+            <span class="tag">Trophy Cabinet</span>
+            <span class="tag">Download as PNG</span>
+          </div>
+          <div class="cta-row" style="margin-top:20px;">
+            <a class="btn btn-primary" href="/auth/github/login">Get my Hunter Card</a>
+          </div>
+        </div>
+        <div>
+          <div class="panel hc-card">
+            <span class="eyebrow" style="font-size:.7rem;">[ HUNTER LICENSE ]</span>
+            <div class="ecard-head" style="margin-top:14px;">
+              <div class="ecard-who">
+                <div class="hc-avatar" aria-hidden="true"></div>
+                <div>
+                  <div class="who-name">arjun-n</div>
+                  <div class="who-id">6 skills claimed</div>
+                </div>
+              </div>
+              <div class="rank-hex" title="Overall rank A">A</div>
+            </div>
+            <div class="hc-stats">
+              <div class="hc-stat"><div class="n mono">6</div><div class="l">Skills</div></div>
+              <div class="hc-stat"><div class="n mono">4</div><div class="l">Verified</div></div>
+              <div class="hc-stat"><div class="n mono">37</div><div class="l">Evidence</div></div>
+              <div class="hc-stat"><div class="n mono">214</div><div class="l">Days</div></div>
+            </div>
+            <div class="hc-trophies">
+              <span class="eyebrow" style="font-size:.68rem;">[ TROPHY CABINET ]</span>
+              <ul class="hc-trophy-list">
+                <li><span class="hc-dot"></span> Fully Verified</li>
+                <li><span class="hc-dot"></span> Multi-Repo</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
 </div>
 
 <div class="future-wrap" id="roadmap">
@@ -485,6 +552,7 @@
       <a href="#how">How it works</a>
       <a href="#signals">Signals</a>
       <a href="#demo">Demo</a>
+      <a href="#hunter-card">Hunter Card</a>
       <a href="#roadmap">Roadmap</a>
     </div>
   </div>

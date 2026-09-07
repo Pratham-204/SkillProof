@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { getEvidenceCard, type CandidateEvidence } from '../api'
 import EvidenceCardList from '../components/EvidenceCardList'
+import HunterCard from '../components/HunterCard'
 
 type Status = 'loading' | 'ready' | 'not-found'
 
@@ -47,10 +48,11 @@ export default function PublicEvidenceCard() {
   return (
     <main className="mx-auto flex min-h-svh max-w-xl flex-col items-center justify-center gap-8 px-6 py-16 text-center">
       <div className="w-full">
-        <p className="text-accent mb-1 font-mono text-xs tracking-[0.3em]">[ HUNTER LICENSE ]</p>
-        <h1 className="font-display mb-1 text-3xl font-semibold tracking-wide break-words">{evidence.github_login}</h1>
-        <p className="text-ink-dim mb-6 text-sm">Verified against real GitHub activity — not a resume line.</p>
-        <EvidenceCardList cards={evidence.cards} candidateId={evidence.candidate_id} />
+        <HunterCard githubLogin={evidence.github_login} cards={evidence.cards} />
+        <p className="text-ink-dim mb-1 mt-8 text-sm">Verified against real GitHub activity — not a resume line.</p>
+        <div className="mt-5">
+          <EvidenceCardList cards={evidence.cards} candidateId={evidence.candidate_id} />
+        </div>
       </div>
     </main>
   )

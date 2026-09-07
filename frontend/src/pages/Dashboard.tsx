@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { GITHUB_LOGIN_URL, getEvidenceCard, updateSearchable, type CandidateEvidence } from '../api'
 import { useRequireCandidate } from '../hooks/useRequireCandidate'
 import EvidenceCardList from '../components/EvidenceCardList'
+import HunterCard from '../components/HunterCard'
 import StatusPanel from '../components/system/StatusPanel'
 
 // The authenticated landing experience for a returning Candidate (CONTEXT.md
@@ -81,10 +82,10 @@ export default function Dashboard() {
   return (
     <main className="mx-auto flex min-h-svh max-w-xl flex-col items-center justify-center gap-8 px-6 py-16 text-center">
       <div className="w-full">
-        <h1 className="font-display mb-1 text-3xl font-semibold tracking-wide">Your Evidence Cards</h1>
-        <p className="text-ink-dim mb-6 text-sm">
-          Signed in as <span className="font-mono">{candidate.github_login}</span>
-        </p>
+        {evidence && <HunterCard githubLogin={candidate.github_login} cards={evidence.cards} />}
+
+        <h2 className="font-display mb-1 mt-8 text-2xl font-semibold tracking-wide">Your Evidence Cards</h2>
+        <p className="text-ink-dim mb-6 text-sm">Every skill you've claimed, scored from real GitHub activity.</p>
 
         <StatusPanel theme={reconnectTheme} size="sm" className="mb-4 p-3 text-left text-sm">
           {candidate.needs_reconnect && (

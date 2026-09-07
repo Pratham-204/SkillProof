@@ -112,9 +112,13 @@ body {
   align-items: center;
   justify-content: center;
   color: var(--rb-ink);
-  background: color-mix(in srgb, var(--rb-ink) 12%, var(--color-bg));
+  /* Solid --color-surface base (not a near-bg tint) so the badge reads as a
+     solid plate against ANY background it's laid over — including, e.g.,
+     overlapping the corner of HunterCard's avatar photo, where a
+     near-transparent fill would nearly vanish against a light avatar. */
+  background: color-mix(in srgb, var(--rb-ink) 28%, var(--color-surface));
   clip-path: polygon(25% 4%, 75% 4%, 100% 50%, 75% 96%, 25% 96%, 0% 50%);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--rb-ink) 55%, transparent) inset,
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--rb-ink) 70%, transparent) inset,
     0 0 18px -4px var(--rb-glow);
 }
 
