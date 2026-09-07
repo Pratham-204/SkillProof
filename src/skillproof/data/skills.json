@@ -956,12 +956,7 @@
       "category": "datastore",
       "description": "Amazon DynamoDB, a managed NoSQL key-value database.",
       "detection": {
-        "manifest_packages": [
-          {
-            "ecosystem": "pip",
-            "name": "boto3"
-          }
-        ],
+        "manifest_packages": [],
         "file_extensions": [],
         "config_files": [],
         "content_markers": [

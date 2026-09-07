@@ -74,15 +74,37 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
     else:
         evidence_type = "verified"
 
+    # Per the Evidence Item term (CONTEXT.md): an item "only counts toward a
+    # Skill Tag's Depth Signal if its commit already matched that Skill Tag's
+    # Detection Pattern (i.e. is Volume-qualifying) ... without a
+    # Volume-qualifying commit behind it, it isn't evidence at all." A PR
+    # comment has no commit of its own, so that guarantee only holds if a PR
+    # comment counts toward Depth/Span exclusively when this skill ALREADY has
+    # at least one Volume-qualifying commit (n_commits > 0) — otherwise a
+    # comment-only match (n_commits == 0) could contribute real Depth/Span
+    # while evidence_type still reports "declared_only" or "none", directly
+    # contradicting what those states promise (declared_only: "a small
+    # nonzero Confidence Score from Presence alone"). Confirmed empirically as
+    # a real bug: a manifest declaration plus one qualifying PR comment with
+    # zero commits produced confidence_score=0.45 under evidence_type=
+    # "declared_only", which promises exactly 0.20 (Presence alone).
+    depth_eligible_items = matching_items if n_commits > 0 else [item for item in matching_items if item.kind == "commit"]
+    # Blank/whitespace-only text (e.g. a commit with an empty message kept
+    # only for its diff) can't meaningfully embed — skip it rather than
+    # feeding an empty string through the model and relying on today's
+    # specific model/target-vector pair to keep its similarity under the
+    # qualifying floor by coincidence.
+    depth_eligible_items = [item for item in depth_eligible_items if item.text.strip()]
+
     # Qualification (the 0.35 floor) always uses the raw similarity — an item
     # either is or isn't real evidence, independent of how much it counts
     # toward Depth's average. The discount only affects that second part.
     #
-    # One batched embed_batch() call for all of this skill's matching items,
-    # not one embed() call per item (ticket 01) — a prerequisite for any future
-    # embeddings backend with real per-call (e.g. network) overhead. A failure
-    # here propagates out of score_skill uncaught; the caller is responsible
-    # for isolating it to this one skill's Evidence Card.
+    # One batched embed_batch() call for all of this skill's Depth-eligible
+    # items, not one embed() call per item (ticket 01) — a prerequisite for
+    # any future embeddings backend with real per-call (e.g. network)
+    # overhead. A failure here propagates out of score_skill uncaught; the
+    # caller is responsible for isolating it to this one skill's Evidence Card.
     # Each qualifying item carries both its raw similarity (what cleared the
     # floor above, and what source_commits shows) and its depth_similarity
     # (raw, discounted for a self-authored item) used only for ranking/
@@ -91,9 +113,9 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
     # similarity were below the documented 0.35 floor (skillproof-
     # explanation-legibility issue 01).
     qualifying: list[tuple[EvidenceItem, float, float]] = []
-    if matching_items:
-        item_vectors = embeddings.embed_batch([item.text for item in matching_items])
-        for item, item_vector in zip(matching_items, item_vectors, strict=True):
+    if depth_eligible_items:
+        item_vectors = embeddings.embed_batch([item.text for item in depth_eligible_items])
+        for item, item_vector in zip(depth_eligible_items, item_vectors, strict=True):
             raw_similarity = embeddings.cosine_similarity(item_vector, target_vector)
             if raw_similarity < settings.evidence_qualifying_floor:
                 continue
@@ -120,6 +142,15 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
 
     # source_commits mirrors top_n, not the full qualifying set: it's meant to
     # show exactly what drove the score, not the wider set that only feeds Span.
+    # Selection into top_n is by depth_similarity (the discounted ranking
+    # value, so a self-authored commit message doesn't out-rank an
+    # undiscounted PR comment it's really weaker than) — but the DISPLAYED
+    # number is always the raw, undiscounted similarity. Sorting the display
+    # list by that same raw value (rather than leaving it in selection order)
+    # keeps the two consistent: without this, a public Evidence Card could
+    # show a 0.50 listed ahead of a 0.70 purely because the 0.70 came from a
+    # discounted commit message that ranked lower for selection.
+    display_order = sorted(top_n, key=lambda triple: triple[1], reverse=True)
     source_commits = [
         QualifyingEvidence(
             kind=item.kind,
@@ -129,7 +160,7 @@ def score_skill(bundle: EvidenceBundle, skill: str) -> ConfidenceResult:
             similarity=round(raw_sim, 4),
             private=item.private,
         )
-        for item, raw_sim, _ in top_n
+        for item, raw_sim, _ in display_order
     ]
 
     return ConfidenceResult(

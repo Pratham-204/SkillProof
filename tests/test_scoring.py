@@ -205,6 +205,24 @@ def test_manifest_declares_rejects_node_sass_as_sass_evidence():
     assert result.confidence_score == 0.0
 
 
+def test_manifest_declares_does_not_credit_dynamodb_from_a_bare_boto3_dependency():
+    """DynamoDB's Detection Pattern previously listed the generic pip "boto3"
+    package (the whole-of-AWS SDK, also legitimately AWS's own manifest
+    package) with no ecosystem/context scoping — any Python project using
+    boto3 for a completely unrelated AWS service (S3, SQS, ...) flipped
+    DynamoDB's Presence. DynamoDB already has a specific, correct signal
+    (content_markers=["dynamodb"]); the redundant boto3 entry was removed."""
+    bundle = EvidenceBundle(
+        items=[],
+        manifests={"octodev/skillproof-lib": {"requirements.txt": "boto3==1.34.0\n"}},
+    )
+
+    result = scoring.score_skill(bundle, "DynamoDB")
+
+    assert result.evidence_type == "none"
+    assert result.confidence_score == 0.0
+
+
 def test_commit_message_mentioning_a_skill_does_not_count_toward_volume_on_its_own():
     """A commit message is freely candidate-authored prose, not evidence of code
     touched — only the diff content (or changed files) can make a commit match a
@@ -411,3 +429,186 @@ def test_fake_backend_pins_the_exact_discount_on_commit_message_depth(fake_embed
     assert expected_depth == 0.8
     expected_confidence = round(0.20 * 1 + 0.40 * (1 / 6) + 0.25 * expected_depth + 0.15 * 0, 4)
     assert result.confidence_score == expected_confidence
+
+
+def test_a_qualifying_pr_comment_with_zero_commits_does_not_inflate_declared_only(fake_embeddings):
+    """Per the Evidence Item term (CONTEXT.md): an item only counts toward
+    Depth "if its commit already matched that Skill Tag's Detection Pattern
+    (i.e. is Volume-qualifying) ... without a Volume-qualifying commit behind
+    it, it isn't evidence at all." A PR comment has no commit of its own, so
+    with zero Volume-qualifying commits for this skill, it must not
+    contribute Depth/Span — declared_only promises "a small nonzero
+    Confidence Score from Presence alone", i.e. exactly PRESENCE_WEIGHT."""
+    # The comment text must itself match Django's Detection Pattern (manifest
+    # package name "django", checked via _text_matches) for this PR comment
+    # to even enter matching_items in the first place — "django" needs to
+    # actually appear in the text, not just conceptually be "about" Django.
+    comment_text = "This Django view could use select_related to cut the query count."
+    fake_embeddings.vectors_by_text[_skill_embedding_key("Django")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text[comment_text] = np.array([1.0, 0.0])
+    bundle = EvidenceBundle(
+        items=[
+            EvidenceItem(
+                kind="pr_comment",
+                repo="octodev/skillproof-lib",
+                ref="p1",
+                url="https://example.com/p1",
+                text=comment_text,
+                date=_NOW,
+            )
+        ],
+        manifests={"octodev/skillproof-lib": {"requirements.txt": "Django==4.2\n"}},
+    )
+
+    result = scoring.score_skill(bundle, "Django")
+
+    assert result.evidence_type == "declared_only"
+    assert result.confidence_score == scoring.PRESENCE_WEIGHT
+    assert result.source_commits == []
+
+
+def test_a_qualifying_pr_comment_with_zero_commits_and_no_manifest_scores_zero(fake_embeddings):
+    """Same gap, but for evidence_type == "none": a comment-only match with no
+    manifest declaration and no commits must not produce any nonzero score."""
+    comment_text = "This Django view could use select_related to cut the query count."
+    fake_embeddings.vectors_by_text[_skill_embedding_key("Django")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text[comment_text] = np.array([1.0, 0.0])
+    bundle = EvidenceBundle(
+        items=[
+            EvidenceItem(
+                kind="pr_comment",
+                repo="octodev/skillproof-lib",
+                ref="p1",
+                url="https://example.com/p1",
+                text=comment_text,
+                date=_NOW,
+            )
+        ],
+        manifests={},
+    )
+
+    result = scoring.score_skill(bundle, "Django")
+
+    assert result.evidence_type == "none"
+    assert result.confidence_score == 0.0
+    assert result.source_commits == []
+
+
+def test_pr_comment_still_counts_toward_depth_when_a_qualifying_commit_exists(fake_embeddings):
+    """Positive control: the fix must not disqualify a PR comment sitting
+    alongside a real Volume-qualifying commit for the same skill — only the
+    comment-with-zero-commits case should be excluded."""
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text[QUALIFYING_REVIEW_COMMENT] = np.array([1.0, 0.0])
+    fake_embeddings.vectors_by_text["unrelated commit message"] = _unit_vector_at_cosine(0.1)  # below floor
+    bundle = EvidenceBundle(
+        items=[
+            EvidenceItem(
+                kind="commit",
+                repo="octodev/skillproof-lib",
+                ref="c1",
+                url="https://example.com/c1",
+                text="unrelated commit message",
+                date=_NOW,
+                diff_text=QUALIFYING_DIFF_TEXT,
+            ),
+            EvidenceItem(
+                kind="pr_comment",
+                repo="octodev/skillproof-lib",
+                ref="p1",
+                url="https://example.com/p1",
+                text=QUALIFYING_REVIEW_COMMENT,
+                date=_NOW,
+            ),
+        ],
+        manifests={},
+    )
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    assert result.evidence_type == "verified"
+    assert {ref.ref for ref in result.source_commits} == {"p1"}
+
+
+def test_source_commits_are_displayed_in_descending_similarity_order(fake_embeddings):
+    """Selection into the top-N is by depth_similarity (the discounted
+    ranking value — a self-authored commit message is discounted relative to
+    an undiscounted PR comment), but the DISPLAYED similarity is always raw
+    and undiscounted. Without sorting the display list by that same raw
+    value, a public Evidence Card could show a lower number listed ahead of a
+    higher one purely because the higher one came from a discounted commit
+    message that ranked lower for selection."""
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    # PR comment: raw similarity 0.50, no discount -> depth_similarity 0.50.
+    fake_embeddings.vectors_by_text[QUALIFYING_REVIEW_COMMENT] = _unit_vector_at_cosine(0.50)
+    # Commit message: raw similarity 0.70, discounted (*0.6) -> depth_similarity 0.42,
+    # so the PR comment outranks it for SELECTION despite the commit's raw
+    # similarity being higher.
+    commit_text = "Fix bug in the FastAPI verify handler after review feedback."
+    fake_embeddings.vectors_by_text[commit_text] = _unit_vector_at_cosine(0.70)
+    bundle = EvidenceBundle(
+        items=[
+            EvidenceItem(
+                kind="pr_comment",
+                repo="octodev/skillproof-lib",
+                ref="p1",
+                url="https://example.com/p1",
+                text=QUALIFYING_REVIEW_COMMENT,
+                date=_NOW,
+            ),
+            EvidenceItem(
+                kind="commit",
+                repo="octodev/skillproof-lib",
+                ref="c1",
+                url="https://example.com/c1",
+                text=commit_text,
+                date=_NOW,
+                diff_text=QUALIFYING_DIFF_TEXT,
+            ),
+        ],
+        manifests={},
+    )
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    similarities = [ref.similarity for ref in result.source_commits]
+    assert similarities == sorted(similarities, reverse=True)
+    assert result.source_commits[0].ref == "c1"  # 0.70, listed first despite ranking below p1 for selection
+
+
+def test_blank_commit_message_is_never_embedded_or_treated_as_qualifying(fake_embeddings):
+    """A commit with a blank/whitespace-only message (kept only for its diff,
+    e.g. a bot commit or `git commit --allow-empty-message`) must not reach
+    the embedding call at all — skipped defensively rather than relying on an
+    empty string happening to land under the qualifying floor for whatever
+    embedding model/target-vector pair is in use."""
+    fake_embeddings.vectors_by_text[_skill_embedding_key("FastAPI")] = np.array([1.0, 0.0])
+    embedded_texts: list[str] = []
+    original_embed_batch = fake_embeddings.embed_batch
+
+    def recording_embed_batch(texts: list[str]) -> np.ndarray:
+        embedded_texts.extend(texts)
+        return original_embed_batch(texts)
+
+    fake_embeddings.embed_batch = recording_embed_batch  # type: ignore[method-assign]
+
+    bundle = EvidenceBundle(
+        items=[
+            EvidenceItem(
+                kind="commit",
+                repo="octodev/skillproof-lib",
+                ref="c1",
+                url="https://example.com/c1",
+                text="   ",
+                date=_NOW,
+                diff_text=QUALIFYING_DIFF_TEXT,
+            )
+        ],
+        manifests={},
+    )
+
+    result = scoring.score_skill(bundle, "FastAPI")
+
+    assert "   " not in embedded_texts
+    assert result.evidence_type == "verified"  # Volume-qualifying via diff_text
+    assert result.source_commits == []  # never reached Depth
