@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -14,6 +15,19 @@ from urllib.parse import urlparse
 import httpx
 
 from skillproof.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+# Statuses that mean "this specific repo/PR/file is gone or unreachable to us
+# right now" rather than a systemic problem — safe to skip just that one
+# resource's evidence rather than letting the exception propagate. A repo
+# found via list_merged_prs's search index can be deleted, renamed,
+# transferred, made private, or have the candidate's access revoked by the
+# time a later per-repo call reaches it; that must not abort every other
+# repo's already-gathered evidence for the whole /verify run. Anything else
+# (5xx, network errors) still propagates — those are more likely transient or
+# systemic and worth surfacing rather than silently swallowing.
+_SKIPPABLE_STATUSES = frozenset({404, 403})
 
 # The well-known dependency-manifest filenames Presence checks against,
 # fetched once per repo (issue 02) rather than once per claimed skill.
@@ -329,17 +343,39 @@ class RealGitHubClient(GitHubClient):
                 params={"author": author_login, "per_page": 100},
             )
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 409:
+            status = exc.response.status_code
+            if status == 409:
                 # GitHub returns 409 Conflict from this endpoint for a repo with no
                 # commits yet (empty repo, no default branch) — zero commits, not an error.
+                return []
+            if status in _SKIPPABLE_STATUSES:
+                # The repo was listed by list_owned_repos moments ago but is gone,
+                # renamed, or now inaccessible by the time this call runs — skip
+                # just this repo's commits rather than aborting the whole scan.
+                logger.warning("Skipping owned repo %s: commits fetch returned %s", repo.full_name, status)
                 return []
             raise
         return self._commit_records(token, repo, [c["sha"] for c in commits])
 
     def _fetch_pr_commits(self, token: str, repo: Repo, pr_number: int) -> list[CommitRecord]:
-        commits = self._get_all_pages(
-            token, f"/repos/{repo.full_name}/pulls/{pr_number}/commits", params={"per_page": 100}
-        )
+        try:
+            commits = self._get_all_pages(
+                token, f"/repos/{repo.full_name}/pulls/{pr_number}/commits", params={"per_page": 100}
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in _SKIPPABLE_STATUSES:
+                # list_merged_prs found this PR via GitHub's search index, which
+                # lags reality — the repo can be deleted, renamed, transferred, or
+                # made private by the time this per-PR call runs. Skip just this
+                # PR's commits rather than aborting the whole scan.
+                logger.warning(
+                    "Skipping merged PR #%s in %s: commits fetch returned %s",
+                    pr_number,
+                    repo.full_name,
+                    exc.response.status_code,
+                )
+                return []
+            raise
         return self._commit_records(token, repo, [c["sha"] for c in commits])
 
     def _commit_records(self, token: str, repo: Repo, shas: list[str]) -> list[CommitRecord]:
@@ -368,7 +404,17 @@ class RealGitHubClient(GitHubClient):
         )
 
     def list_pr_review_comments(self, token: str, repo: Repo, author_login: str) -> list[PrCommentRecord]:
-        data = self._get_all_pages(token, f"/repos/{repo.full_name}/pulls/comments", params={"per_page": 100})
+        try:
+            data = self._get_all_pages(token, f"/repos/{repo.full_name}/pulls/comments", params={"per_page": 100})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in _SKIPPABLE_STATUSES:
+                # Same stale-search-hit gap as _fetch_pr_commits above: skip this
+                # repo's PR comments rather than aborting the whole scan.
+                logger.warning(
+                    "Skipping PR review comments for %s: fetch returned %s", repo.full_name, exc.response.status_code
+                )
+                return []
+            raise
         return [
             PrCommentRecord(
                 repo=repo,
@@ -390,7 +436,19 @@ class RealGitHubClient(GitHubClient):
             try:
                 data = self._get_json(token, f"/repos/{repo.full_name}/contents/{filename}")
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
+                status = exc.response.status_code
+                if status == 404:
+                    # The file doesn't exist at this path — an expected, silent
+                    # outcome for most of MANIFEST_FILENAMES on any given repo.
+                    return filename, None
+                if status in _SKIPPABLE_STATUSES:
+                    # Repo became inaccessible (deleted/private/access-revoked)
+                    # between being listed and this call — skip just this
+                    # filename rather than aborting the whole repo's manifest
+                    # check (and, upstream, the entire scan).
+                    logger.warning(
+                        "Skipping manifest file %s in %s: fetch returned %s", filename, repo.full_name, status
+                    )
                     return filename, None
                 raise
             content = data.get("content") if isinstance(data, dict) else None

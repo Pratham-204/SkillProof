@@ -260,6 +260,116 @@ def test_list_qualifying_commits_treats_409_empty_repo_as_zero_commits():
     assert commits == []
 
 
+def test_a_vanished_owned_repo_does_not_abort_other_owned_repos_commits():
+    """Regression test for a real production crash: a repo in list_owned_repos'
+    result can be deleted, renamed, or have access revoked by the time the
+    commits fetch for it actually runs. That must skip just this repo's
+    commits, not raise and abort every other owned repo's already-gathered
+    evidence for the whole /verify run."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/repos":
+            return httpx.Response(
+                200,
+                json=[
+                    {"owner": {"login": "octodev"}, "name": "gone-repo", "fork": False, "private": False},
+                    {"owner": {"login": "octodev"}, "name": "fine-repo", "fork": False, "private": False},
+                ],
+            )
+        if request.url.path == "/search/issues":
+            return httpx.Response(200, json={"items": []})
+        if request.url.path == "/repos/octodev/gone-repo/commits":
+            return httpx.Response(404, json={"message": "Not Found"})
+        if request.url.path == "/repos/octodev/fine-repo/commits":
+            return httpx.Response(200, json=[{"sha": "c1"}])
+        if request.url.path == "/repos/octodev/fine-repo/commits/c1":
+            return httpx.Response(
+                200,
+                json={
+                    "commit": {"message": "msg", "author": {"date": "2024-01-01T00:00:00Z"}},
+                    "files": [],
+                    "html_url": "https://github.com/octodev/fine-repo/commit/c1",
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = _client(handler)
+
+    commits = client.list_qualifying_commits("token", "octodev")
+
+    assert [c.sha for c in commits] == ["c1"]
+
+
+def test_a_vanished_external_repo_does_not_abort_other_merged_prs_commits():
+    """Same gap as above, but for an external repo reached via list_merged_prs
+    (whose search-index result lags reality even more than an owned repo)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/repos":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/search/issues":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"repository_url": "https://api.github.com/repos/someorg/gone-repo", "number": 1},
+                        {"repository_url": "https://api.github.com/repos/someorg/fine-repo", "number": 2},
+                    ]
+                },
+            )
+        if request.url.path == "/repos/someorg/gone-repo/pulls/1/commits":
+            return httpx.Response(403, json={"message": "Forbidden"})
+        if request.url.path == "/repos/someorg/fine-repo/pulls/2/commits":
+            return httpx.Response(200, json=[{"sha": "e1"}])
+        if request.url.path == "/repos/someorg/fine-repo/commits/e1":
+            return httpx.Response(
+                200,
+                json={
+                    "commit": {"message": "msg", "author": {"date": "2024-01-01T00:00:00Z"}},
+                    "files": [],
+                    "html_url": "https://github.com/someorg/fine-repo/commit/e1",
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = _client(handler)
+
+    commits = client.list_qualifying_commits("token", "octodev")
+
+    assert [c.sha for c in commits] == ["e1"]
+
+
+def test_list_pr_review_comments_returns_empty_for_a_now_inaccessible_repo():
+    """Regression test: this call previously had zero exception handling at
+    all, so a 404/403 here raised uncaught and (via ingestion.py's thread pool)
+    aborted the entire /verify run for every claimed skill."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = _client(handler)
+
+    comments = client.list_pr_review_comments("token", Repo(owner="someorg", name="gone-repo"), "octodev")
+
+    assert comments == []
+
+
+def test_get_manifest_files_skips_a_now_forbidden_file_without_raising():
+    """A 403 on one manifest filename (repo access revoked mid-scan) must not
+    abort checking the other ~19 MANIFEST_FILENAMES for the same repo."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/requirements.txt"):
+            return httpx.Response(403, json={"message": "Forbidden"})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = _client(handler)
+
+    files = client.get_manifest_files("token", Repo(owner="octodev", name="skillproof-lib"))
+
+    assert files == {}
+
+
 def test_get_manifest_files_retries_on_secondary_rate_limit_then_succeeds(monkeypatch):
     monkeypatch.setattr(github_client.time, "sleep", lambda seconds: None)
     attempts = {"requirements.txt": 0}
