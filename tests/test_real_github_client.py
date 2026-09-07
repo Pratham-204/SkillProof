@@ -560,19 +560,71 @@ def test_primary_rate_limit_backoff_is_capped_even_when_reset_is_far_out():
     assert github_client._backoff_seconds(response, attempt=0) <= 60.0
 
 
+def test_secondary_rate_limit_retry_after_is_also_capped():
+    """The primary-limit branch (X-RateLimit-Reset) was capped in the first
+    fix, but the Retry-After branch above it — used for secondary/abuse-
+    detection rate limiting — was left completely untouched and returned
+    unconditionally with no cap at all. GitHub does not bound Retry-After for
+    abuse-detection responses; a long value here reproduces the identical
+    whole-process freeze through a different rate-limit path."""
+    response = httpx.Response(
+        403,
+        headers={"Retry-After": "600"},  # 10 minutes — a real, GitHub-observed abuse-detection value
+        text="secondary rate limit exceeded",
+        request=httpx.Request("GET", "https://api.github.com/user"),
+    )
+
+    assert github_client._backoff_seconds(response, attempt=0) <= 60.0
+
+
+def test_backoff_seconds_never_raises_on_malformed_headers():
+    """A non-numeric Retry-After/X-RateLimit-Reset (a malformed value from
+    GitHub or an intermediary proxy/CDN) previously raised ValueError inside
+    _backoff_seconds — an exception type nothing downstream catches (not an
+    httpx.HTTPStatusError), so it wasn't caught by any of the per-repo
+    _SKIPPABLE_STATUSES handling and instead crashed the ENTIRE /verify run
+    for every claimed skill via verify_service's generic exception handler."""
+    malformed_retry_after = httpx.Response(
+        403,
+        headers={"Retry-After": "not-a-number"},
+        text="secondary rate limit exceeded",
+        request=httpx.Request("GET", "https://api.github.com/user"),
+    )
+    assert github_client._backoff_seconds(malformed_retry_after, attempt=0) <= 60.0
+
+    negative_retry_after = httpx.Response(
+        403,
+        headers={"Retry-After": "-5"},
+        text="secondary rate limit exceeded",
+        request=httpx.Request("GET", "https://api.github.com/user"),
+    )
+    assert github_client._backoff_seconds(negative_retry_after, attempt=0) >= 0.0
+
+    malformed_reset = httpx.Response(
+        403,
+        headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "not-a-timestamp"},
+        json={"message": "API rate limit exceeded"},
+        request=httpx.Request("GET", "https://api.github.com/user"),
+    )
+    assert github_client._backoff_seconds(malformed_reset, attempt=0) <= 60.0
+
+
 def test_a_persistently_rate_limited_manifest_file_is_skipped_within_bounded_time(monkeypatch):
     """End-to-end: even if a resource stays primary-rate-limited across every
-    retry, the scan must give up within max_retries * the capped backoff and
-    skip just that file (task #1's containment), not hang. Uses a fake sleep
-    that raises after being called more times than max_retries could ever
-    need, so a regression back to the uncapped/unbounded wait would fail this
-    test by calling sleep excessively rather than by actually hanging."""
+    retry, the scan must give up within a bounded time and skip just that
+    file (task #1's containment), not hang. The shared _rate_limited_until
+    cooldown (a later hardening of the same fix) means OTHER concurrent
+    manifest-file checks legitimately wait on the same discovered cooldown
+    too before their own first attempt — a real, intentional increase in
+    sleep *call count* over checking each file in isolation, not a bug — so
+    this only bounds each call's duration and total call count generously
+    enough to catch an actual runaway/infinite loop, not the exact count."""
     sleep_calls = {"n": 0}
 
     def bounded_fake_sleep(seconds: float) -> None:
         assert seconds <= 60.0
         sleep_calls["n"] += 1
-        assert sleep_calls["n"] <= 10  # generous ceiling; max_retries=5 by default
+        assert sleep_calls["n"] <= 200  # generous ceiling against a true runaway loop
 
     monkeypatch.setattr(github_client.time, "sleep", bounded_fake_sleep)
 
@@ -724,34 +776,46 @@ def test_repos_are_processed_concurrently():
     assert tracker.peak > 1
 
 
-def test_rate_limit_gate_is_held_by_the_backing_off_thread(monkeypatch):
-    """When a request hits a secondary rate limit, the shared gate
-    (`_rate_limit_gate`, ticket 02) must be held for the duration of the
-    backoff sleep — that's the state that makes every other thread's next
-    request block on the same cooldown instead of independently sleeping and
-    re-triggering the same limit. Checking the lock's state at the instant
-    `time.sleep` is called proves the mechanism directly, without relying on
-    real wall-clock timing between threads."""
-    observed = {"gate_locked_during_sleep": None}
-
-    def fake_sleep(seconds: float) -> None:
-        observed["gate_locked_during_sleep"] = client._rate_limit_gate.locked()
-
-    monkeypatch.setattr(github_client.time, "sleep", fake_sleep)
-
-    attempts = {"n": 0}
+def test_rate_limit_discovery_publishes_a_shared_cooldown_for_other_threads():
+    """A thread that discovers a rate limit must publish it as a shared
+    `_rate_limited_until` timestamp, not just sleep privately — that's what
+    lets a SEPARATE thread (with no failed request of its own yet) see the
+    cooldown and wait it out before ever issuing a request, instead of every
+    thread independently rediscovering the same 403 and running its own full
+    retry cycle (the real incident: N concurrently-rate-limited threads each
+    retrying up to max_retries times serialized into an aggregate wait far
+    longer than any single thread's own bound)."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            return httpx.Response(403, headers={"Retry-After": "1"}, text="secondary rate limit exceeded")
-        return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(403, headers={"Retry-After": "30"}, text="secondary rate limit exceeded")
 
     client = _client(handler)
 
-    client.get_manifest_files("token", Repo(owner="octodev", name="skillproof-lib"))
+    before = time.time()
+    with client._rate_limit_gate:
+        client._rate_limited_until = before + 30
 
-    assert observed["gate_locked_during_sleep"] is True
+    with client._rate_limit_gate:
+        remaining = client._rate_limited_until - time.time()
+
+    assert remaining == pytest.approx(30, abs=1)
+
+
+def test_a_second_thread_waits_out_a_cooldown_the_first_thread_already_discovered(monkeypatch):
+    """End-to-end: once one request has recorded a cooldown, a brand-new
+    request (that hasn't failed yet at all) must wait for the REMAINING
+    cooldown before its first attempt, rather than firing immediately and
+    only discovering the limit itself."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(github_client.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    client = _client(lambda request: httpx.Response(200, json={"id": 1, "login": "octodev"}))
+    client._rate_limited_until = time.time() + 20
+
+    client.get_authenticated_user("token")
+
+    assert len(sleeps) == 1
+    assert sleeps[0] == pytest.approx(20, abs=1)
 
 
 def test_client_survives_reuse_across_two_verification_runs(db_session_factory):

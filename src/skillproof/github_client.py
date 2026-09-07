@@ -32,6 +32,24 @@ logger = logging.getLogger(__name__)
 # surfacing rather than silently swallowing.
 _SKIPPABLE_STATUSES = frozenset({404, 403, 429})
 
+
+def _skip_reason(exc: httpx.HTTPStatusError) -> str:
+    """A 429 reaching one of _SKIPPABLE_STATUSES's call sites was NOT
+    necessarily confirmed as a rate limit — _is_rate_limited only gates
+    whether _fetch_page's retry loop engages at all; a 429 with no rate-limit
+    signal (no Retry-After, X-RateLimit-Remaining not "0") skips the retry
+    loop entirely and raises immediately, indistinguishable by status code
+    alone from a rate-limited 429 that exhausted every retry. Both still get
+    treated as skippable (the alternative — crashing the whole run over an
+    ambiguous 429 — is worse), but the log should say which case it was
+    rather than implying every 429 here was confirmed rate-limiting."""
+    status = exc.response.status_code
+    if status != 429:
+        return str(status)
+    if _is_rate_limited(exc.response):
+        return "429 (rate-limited; retries exhausted)"
+    return "429 (no rate-limit signal present — treated as skippable, but not confirmed to be rate-limiting)"
+
 # The well-known dependency-manifest filenames Presence checks against,
 # fetched once per repo (issue 02) rather than once per claimed skill.
 MANIFEST_FILENAMES = (
@@ -271,11 +289,19 @@ class RealGitHubClient(GitHubClient):
         self._item_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="github-item")
         self._repo_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="github-repo")
 
-        # A shared cooldown gate (ticket 02): a rate-limited response makes the
-        # thread that saw it hold this lock for the backoff duration, so every
-        # other thread's next request blocks acquiring the same lock instead of
-        # each independently sleeping and re-discovering the same 403.
+        # A shared cooldown (ticket 02, hardened after a real incident): every
+        # thread checks `_rate_limited_until` before issuing a request and waits
+        # if it's still in the future, and a thread that discovers a new rate
+        # limit extends it (never shortens it — `max()`) for every other thread
+        # to see. This is what makes N concurrently-rate-limited threads (e.g.
+        # `_item_pool`'s 8 workers hitting the same token's limit at once)
+        # collapse into roughly ONE wait instead of each independently
+        # rediscovering the same 403 and separately retrying up to
+        # `max_retries` times — which, unguarded, serialized into an aggregate
+        # wait of (worker count) * max_retries * (per-attempt cap), not the
+        # single-thread bound the per-attempt cap alone would suggest.
         self._rate_limit_gate = threading.Lock()
+        self._rate_limited_until = 0.0
 
     def exchange_code_for_token(self, code: str) -> str:
         settings = get_settings()
@@ -373,7 +399,7 @@ class RealGitHubClient(GitHubClient):
                 # The repo was listed by list_owned_repos moments ago but is gone,
                 # renamed, or now inaccessible by the time this call runs — skip
                 # just this repo's commits rather than aborting the whole scan.
-                logger.warning("Skipping owned repo %s: commits fetch returned %s", repo.full_name, status)
+                logger.warning("Skipping owned repo %s: commits fetch returned %s", repo.full_name, _skip_reason(exc))
                 return []
             raise
         return self._commit_records(token, repo, [c["sha"] for c in commits])
@@ -393,7 +419,7 @@ class RealGitHubClient(GitHubClient):
                     "Skipping merged PR #%s in %s: commits fetch returned %s",
                     pr_number,
                     repo.full_name,
-                    exc.response.status_code,
+                    _skip_reason(exc),
                 )
                 return []
             raise
@@ -438,7 +464,7 @@ class RealGitHubClient(GitHubClient):
                 # Same stale-search-hit gap as _fetch_pr_commits above: skip this
                 # repo's PR comments rather than aborting the whole scan.
                 logger.warning(
-                    "Skipping PR review comments for %s: fetch returned %s", repo.full_name, exc.response.status_code
+                    "Skipping PR review comments for %s: fetch returned %s", repo.full_name, _skip_reason(exc)
                 )
                 return []
             raise
@@ -474,7 +500,7 @@ class RealGitHubClient(GitHubClient):
                     # filename rather than aborting the whole repo's manifest
                     # check (and, upstream, the entire scan).
                     logger.warning(
-                        "Skipping manifest file %s in %s: fetch returned %s", filename, repo.full_name, status
+                        "Skipping manifest file %s in %s: fetch returned %s", filename, repo.full_name, _skip_reason(exc)
                     )
                     return filename, None
                 raise
@@ -553,19 +579,28 @@ class RealGitHubClient(GitHubClient):
 
         attempt = 0
         while True:
-            # Blocks here for as long as any thread (this one or another) is
-            # currently backing off below — one shared cooldown instead of every
-            # thread independently sleeping and re-triggering the same limit.
+            # Wait out whatever cooldown any thread (this one or another) has
+            # already discovered, sourced from the shared timestamp rather than
+            # rediscovering it via a fresh 403/429 of our own — this is what
+            # collapses N concurrently-rate-limited threads into roughly one
+            # wait instead of each independently retrying up to max_retries times.
             with self._rate_limit_gate:
-                pass
+                remaining = self._rate_limited_until - time.time()
+            if remaining > 0:
+                time.sleep(remaining)
             response = self._client.get(url, headers=headers, params=params)
             if response.status_code == 304 and cached_body is not None:
                 return cached_body, cached_links or {}
             if response.status_code == 401:
                 raise GitHubAuthError("GitHub token is invalid or has been revoked")
             if response.status_code in (403, 429) and _is_rate_limited(response) and attempt < max_retries:
+                wait_for = _backoff_seconds(response, attempt)
                 with self._rate_limit_gate:
-                    time.sleep(_backoff_seconds(response, attempt))
+                    # max(), never overwrite: two threads discovering the same
+                    # limit near-simultaneously must not let the later one's
+                    # (possibly shorter, due to clock/response timing) estimate
+                    # shorten a wait another thread is already relying on.
+                    self._rate_limited_until = max(self._rate_limited_until, time.time() + wait_for)
                 attempt += 1
                 continue
             response.raise_for_status()
@@ -605,26 +640,37 @@ def _is_rate_limited(response: httpx.Response) -> bool:
     return _is_secondary_rate_limit(response) or _is_primary_rate_limit(response)
 
 
+_MAX_BACKOFF_SECONDS = 60.0  # every branch below is capped at this — see the incident note below
+
+
 def _backoff_seconds(response: httpx.Response, attempt: int) -> float:
+    """Every branch here is capped at _MAX_BACKOFF_SECONDS and never raises,
+    however malformed the response's headers are. Both properties are
+    load-bearing: this value feeds a real sleep (via the shared
+    _rate_limited_until timestamp in _fetch_page) that every GitHub request
+    across the whole process waits on, since RealGitHubClient is a
+    process-wide singleton — an uncapped or exception-raising value here was
+    a real production incident (one candidate's rate limit froze GitHub
+    connectivity for every concurrent scan on the server, for up to an hour,
+    the first time; a second, still-uncapped branch reproduced the same
+    freeze through GitHub's secondary/abuse-detection path, which this fixes
+    too). If the limit genuinely hasn't cleared after max_retries's worth of
+    capped waits, the caller gives up and the request's status is handled
+    like any other failure — skipped per-repo (_SKIPPABLE_STATUSES) rather
+    than hanging.
+    """
     retry_after = response.headers.get("Retry-After")
     if retry_after:
-        return float(retry_after)
+        try:
+            return min(max(float(retry_after), 0.0), _MAX_BACKOFF_SECONDS)
+        except ValueError:
+            pass  # non-numeric Retry-After (a malformed/unexpected value) — fall through
     reset_at = response.headers.get("X-RateLimit-Reset")
     if reset_at and _is_primary_rate_limit(response):
-        # X-RateLimit-Reset is the epoch second the primary limit's window
-        # rolls over, which can be up to an hour out — capped at 60s (same
-        # ceiling as the exponential fallback below) because this sleep runs
-        # while holding _rate_limit_gate, a lock shared by every GitHub
-        # request across the whole process (RealGitHubClient is a process-
-        # wide singleton), not just this one candidate's scan. An uncapped
-        # wait here was a real production incident: one candidate's primary
-        # rate limit froze GitHub connectivity for every concurrent scan on
-        # the server, indefinitely, with no user-visible error. If the limit
-        # genuinely hasn't reset after max_retries's worth of capped waits,
-        # the caller gives up and this request's status (403/429) is handled
-        # like any other failure — skipped per-repo (github_client.py's
-        # _SKIPPABLE_STATUSES) rather than hanging.
-        return min(max(float(reset_at) - time.time(), 1.0), 60.0)
+        try:
+            return min(max(float(reset_at) - time.time(), 1.0), _MAX_BACKOFF_SECONDS)
+        except ValueError:
+            pass  # non-numeric X-RateLimit-Reset — fall through to the exponential default
     return min(2**attempt, 60)
 
 
