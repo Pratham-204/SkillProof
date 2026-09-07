@@ -1,9 +1,12 @@
+import logging
 from functools import lru_cache
 from typing import Self
 
 from cryptography.fernet import Fernet
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -105,6 +108,53 @@ class Settings(BaseSettings):
             )
         if not self.token_encryption_key:
             self.token_encryption_key = Fernet.generate_key().decode()
+
+        # Catches a malformed key (not 32 url-safe base64-encoded bytes) at
+        # startup instead of on the first OAuth login — security.py's
+        # encrypt_token() constructs a Fernet the same way with no try/except
+        # around it, so an invalid key used to crash every single login with
+        # an unhandled 500 instead of failing the deploy up front.
+        try:
+            Fernet(self.token_encryption_key.encode())
+        except ValueError as exc:
+            raise ValueError(
+                "SKILLPROOF_TOKEN_ENCRYPTION_KEY is not a valid Fernet key (must "
+                "be 32 url-safe base64-encoded bytes, e.g. the output of "
+                "`Fernet.generate_key()`) — every GitHub OAuth login would "
+                "otherwise crash trying to encrypt the token with it."
+            ) from exc
+
+        if self.environment == "production":
+            fields = type(self).model_fields
+            if (
+                self.github_client_id == fields["github_client_id"].default
+                or self.github_client_secret == fields["github_client_secret"].default
+            ):
+                raise ValueError(
+                    "SKILLPROOF_GITHUB_CLIENT_ID/SKILLPROOF_GITHUB_CLIENT_SECRET must be "
+                    "set to the real GitHub OAuth app's credentials when "
+                    "SKILLPROOF_ENVIRONMENT=production — they're still the dev "
+                    "placeholder values, so every login would fail at GitHub's "
+                    "token-exchange step."
+                )
+            if self.database_url == fields["database_url"].default:
+                raise ValueError(
+                    "SKILLPROOF_DATABASE_URL (or DATABASE_URL) must point at a real "
+                    "Postgres database when SKILLPROOF_ENVIRONMENT=production — it "
+                    "still resolves to the local SQLite fallback (ADR-0010), which "
+                    "lives on the container's ephemeral filesystem and is silently "
+                    "wiped on every redeploy."
+                )
+            if not self.groq_api_key:
+                # Not a fail-fast: explain_service already has a working
+                # template-fallback path for a missing/unavailable Groq key, so
+                # this shouldn't block startup — but it should be impossible to
+                # miss in the logs, unlike the silent degradation this used to be.
+                logger.warning(
+                    "SKILLPROOF_GROQ_API_KEY is not set in production — every "
+                    "/explain response will silently fall back to the deterministic "
+                    "template sentence instead of an LLM-generated explanation."
+                )
 
         if self.environment == "production" and "session_cookie_secure" not in self.model_fields_set:
             self.session_cookie_secure = True
