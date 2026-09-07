@@ -6,4 +6,6 @@ Railway's own GitHub integration was also capable of auto-deploying the service 
 
 ## Consequences
 
+**Update:** the standalone `docker-smoke-test.yml` workflow was later folded into `ci.yml` as a `docker-smoke` job, and `deploy`'s `needs:` list was extended to `[backend, frontend, docker-smoke]` so the gate also blocks on a real container smoke test, not just the `backend`/`frontend` test jobs described above.
+
 A broken `deploy` job (an invalid `RAILWAY_TOKEN`, an ambiguous `--service` reference, or any other Actions-side failure) now means *no* path can deploy until it's fixed — there's no longer an implicit fallback the way Railway's native trigger, if left enabled, would provide. That's the intended trade-off: a stuck deploy is a visible, debuggable CI failure rather than a silent bypass of the gate this ADR exists to enforce.
