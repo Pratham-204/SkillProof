@@ -40,9 +40,33 @@ def parse_npm(content: str) -> set[str]:
     return names
 
 
+_VCS_URL_PREFIXES = ("git+", "hg+", "svn+", "bzr+", "http://", "https://")
+
+
+def _vcs_or_url_package_name(line: str) -> str | None:
+    """The real package name for a VCS/direct-URL requirement line lives in an
+    '#egg=' fragment or, for a PEP 508 'name @ url' direct reference, in the
+    token before ' @ ' — never in the URL itself. Naive '#'-comment-stripping
+    would destroy the '#egg=' fragment, and the version-stripping regex has
+    nothing in a bare URL to split on, so this must run before either."""
+    if "#egg=" in line:
+        return line.split("#egg=", 1)[1].split("&", 1)[0].strip() or None
+    if " @ " in line:
+        return line.split(" @ ", 1)[0].strip() or None
+    return None
+
+
 def parse_pip_requirements(content: str) -> set[str]:
     names: set[str] = set()
-    for line in content.splitlines():
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(_VCS_URL_PREFIXES) or " @ " in line:
+            name = _vcs_or_url_package_name(line)
+            if name:
+                names.add(name)
+            continue
         line = line.split("#", 1)[0].strip()
         if not line or line.startswith("-"):
             continue
@@ -58,11 +82,17 @@ def parse_pyproject_toml(content: str) -> set[str]:
     except tomllib.TOMLDecodeError:
         return set()
     names: set[str] = set()
-    for dep in data.get("project", {}).get("dependencies", []):
+    project = data.get("project", {})
+    # [[project]] array-of-tables or a top-level `project = "..."` both parse
+    # fine as TOML but leave `project` a list/str, not the table this expects.
+    dependencies = project.get("dependencies", []) if isinstance(project, dict) else []
+    for dep in dependencies:
         name = _strip_version(dep)
         if name:
             names.add(name)
-    poetry_deps = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
+    tool = data.get("tool", {})
+    poetry = tool.get("poetry", {}) if isinstance(tool, dict) else {}
+    poetry_deps = poetry.get("dependencies", {}) if isinstance(poetry, dict) else {}
     if isinstance(poetry_deps, dict):
         names.update(k for k in poetry_deps if k.lower() != "python")
     return names
@@ -102,7 +132,7 @@ def parse_gemfile(content: str) -> set[str]:
 
 
 def parse_mix_exs(content: str) -> set[str]:
-    return set(re.findall(r"\{:(\w+)\s*,", content))
+    return set(re.findall(r"""^\s*\{:(\w+)\s*,""", content, re.MULTILINE))
 
 
 def parse_pubspec(content: str) -> set[str]:
@@ -127,7 +157,16 @@ def parse_pom_xml(content: str) -> set[str]:
         root = ElementTree.fromstring(content)
     except ElementTree.ParseError:
         return set()
-    return {el.text.strip() for el in root.iter() if el.tag.endswith("artifactId") and el.text and el.text.strip()}
+    # Scoped to <dependencies><dependency><artifactId> only (the "{*}" wildcard
+    # matches any namespace, including a namespaced pom.xml's default xmlns) —
+    # this excludes <parent>, <build>/<reporting> plugins, and the project's own
+    # top-level <artifactId>, while still covering <dependencyManagement>, whose
+    # <dependencies> is reachable by the same descendant search.
+    return {
+        el.text.strip()
+        for el in root.findall(".//{*}dependencies/{*}dependency/{*}artifactId")
+        if el.text and el.text.strip()
+    }
 
 
 _PARSERS_BY_FILENAME: dict[str, tuple[str, Callable[[str], set[str]]]] = {
@@ -143,12 +182,16 @@ _PARSERS_BY_FILENAME: dict[str, tuple[str, Callable[[str], set[str]]]] = {
 }
 
 
-def extract_declared_packages(filename: str, content: str) -> tuple[str, set[str]] | None:
+def extract_declared_packages(filename: str, content: str | None) -> tuple[str, set[str]] | None:
     """(ecosystem, declared package names) for a manifest filename this module knows
     how to parse, or None for one it doesn't. Never raises — malformed content for a
-    known filename yields an empty set, not an exception."""
+    known filename yields an empty set, not an exception. `content` is None for the
+    shape GitHub's contents API returns for a manifest over 1MB, a directory, or a
+    submodule — guarded here once rather than in each of the 9 parsers below."""
     entry = _PARSERS_BY_FILENAME.get(filename)
     if entry is None:
         return None
     ecosystem, parser = entry
+    if content is None:
+        return ecosystem, set()
     return ecosystem, parser(content)

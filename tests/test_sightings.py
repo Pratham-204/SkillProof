@@ -1,7 +1,17 @@
 """Round 8 (ADR-0008): recording raw material for the self-extending taxonomy."""
 
+from skillproof import manifest_parsing
 from skillproof.models import Candidate, Sighting
 from skillproof.sightings import record_sightings
+from tests.fixtures.github_fixtures import wire_verified_candidate
+
+
+def _connect(client, *, login="octodev", github_user_id=42, code="test-code") -> dict:
+    response = client.get(f"/auth/github/callback?code={code}", follow_redirects=False)
+    assert response.status_code in (302, 307)
+    me = client.get("/auth/github/me")
+    assert me.status_code == 200
+    return me.json()
 
 
 def _make_candidate(db) -> str:
@@ -70,3 +80,28 @@ def test_record_sightings_survives_a_row_already_committed_by_another_session(db
         assert len(sightings) == 1
     finally:
         db2.close()
+
+
+def test_record_sightings_per_file_failure_does_not_leave_run_verification_stuck_processing(
+    client, fake_github, monkeypatch
+):
+    """Bug: record_sightings sits outside every try/except in run_verification
+    except the outer `finally` (which has no `except`) — so any exception it
+    raises (a parser bug, a dropped DB connection, anything besides the one
+    IntegrityError already handled in `_record_one`) used to propagate straight
+    out of run_verification. Every EvidenceCard was then left stuck at
+    "processing" forever, even though the `finally` block still published a
+    "done" SSE event claiming the run had finished."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    candidate_id = _connect(client)["candidate_id"]
+
+    def _boom(filename, content):
+        raise RuntimeError("simulated parser bug")
+
+    monkeypatch.setattr(manifest_parsing, "extract_declared_packages", _boom)
+
+    client.post("/verify", json={"skills": ["FastAPI"]})
+
+    cards = client.get(f"/evidence-card/{candidate_id}").json()["cards"]
+    assert len(cards) == 1
+    assert cards[0]["status"] != "processing"

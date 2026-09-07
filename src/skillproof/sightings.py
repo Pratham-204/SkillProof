@@ -4,11 +4,15 @@ self-extending taxonomy's batch publish job, not evidence and never scored.
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from skillproof import manifest_parsing, taxonomy
 from skillproof.models import Sighting
+
+logger = logging.getLogger(__name__)
 
 
 def record_sightings(db: Session, candidate_id: str, manifests: dict[str, dict[str, str]]) -> None:
@@ -23,14 +27,23 @@ def record_sightings(db: Session, candidate_id: str, manifests: dict[str, dict[s
     known = taxonomy.known_manifest_package_names()
     for repo, files in manifests.items():
         for filename, content in files.items():
-            parsed = manifest_parsing.extract_declared_packages(filename, content)
-            if parsed is None:
-                continue
-            ecosystem, package_names = parsed
-            for name in package_names:
-                if taxonomy.ManifestPackage(ecosystem=ecosystem, name=name.lower()) in known:
+            # No parser here is allowed to take down the whole /verify run (a
+            # bug in one manifest parser, a dropped DB connection mid-insert,
+            # anything besides the one IntegrityError _record_one already
+            # handles): this call sits outside run_verification's own
+            # try/except blocks, so an uncaught exception here would leave
+            # every claimed skill's EvidenceCard stuck at "processing" forever.
+            try:
+                parsed = manifest_parsing.extract_declared_packages(filename, content)
+                if parsed is None:
                     continue
-                _record_one(db, ecosystem=ecosystem, package_name=name, candidate_id=candidate_id, repo=repo)
+                ecosystem, package_names = parsed
+                for name in package_names:
+                    if taxonomy.ManifestPackage(ecosystem=ecosystem, name=name.lower()) in known:
+                        continue
+                    _record_one(db, ecosystem=ecosystem, package_name=name, candidate_id=candidate_id, repo=repo)
+            except Exception:
+                logger.exception("Recording sightings failed for %s in %s", filename, repo)
 
 
 def _record_one(db: Session, *, ecosystem: str, package_name: str, candidate_id: str, repo: str) -> None:
