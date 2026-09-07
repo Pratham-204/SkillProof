@@ -67,6 +67,22 @@ export interface SearchResult {
   matches: SearchMatch[]
 }
 
+/**
+ * Extracts a user-facing message from a failed response's JSON body.
+ * Checks this app's own `detail` field first (FastAPI's HTTPException shape),
+ * then slowapi's default rate-limit handler's `error` field (no `detail` key
+ * at all), then falls back to a generic "<verb> <path> failed: <status>".
+ */
+async function errorMessage(response: Response, fallback: string): Promise<string> {
+  const body: unknown = await response.json().catch(() => ({}))
+  if (body && typeof body === 'object') {
+    const record = body as Record<string, unknown>
+    if (typeof record.detail === 'string') return record.detail
+    if (typeof record.error === 'string') return record.error
+  }
+  return fallback
+}
+
 /** Resolves the current session, or `null` if there isn't one (401) — never throws for that case. */
 export async function getMe(): Promise<Candidate | null> {
   const response = await fetch('/auth/github/me', { credentials: 'same-origin' })
@@ -82,7 +98,9 @@ export async function updateSearchable(searchable: boolean): Promise<Candidate> 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ searchable }),
   })
-  if (!response.ok) throw new Error(`PATCH /auth/github/me/searchable failed: ${response.status}`)
+  if (!response.ok) {
+    throw new Error(await errorMessage(response, `PATCH /auth/github/me/searchable failed: ${response.status}`))
+  }
   return response.json()
 }
 
@@ -100,8 +118,7 @@ export async function verify(skills: string[], searchable: boolean): Promise<voi
     body: JSON.stringify({ skills, searchable }),
   })
   if (!response.ok) {
-    const body = await response.json().catch(() => ({}))
-    throw new Error(body.detail ?? `POST /verify failed: ${response.status}`)
+    throw new Error(await errorMessage(response, `POST /verify failed: ${response.status}`))
   }
 }
 
@@ -119,7 +136,11 @@ export async function explainSkill(
     method: 'POST',
     credentials: 'same-origin',
   })
-  if (!response.ok) throw new Error(`POST /explain/${candidateId}/${skill} failed: ${response.status}`)
+  if (!response.ok) {
+    throw new Error(
+      await errorMessage(response, `POST /explain/${candidateId}/${skill} failed: ${response.status}`),
+    )
+  }
   return response.json()
 }
 

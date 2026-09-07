@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion'
 import { useEffect, useRef, useState } from 'react'
-import { GITHUB_LOGIN_URL, getEvidenceCard, type EvidenceCard as EvidenceCardType } from '../api'
+import { GITHUB_LOGIN_URL, getEvidenceCard, getMe, type EvidenceCard as EvidenceCardType } from '../api'
 import { useRequireCandidate } from '../hooks/useRequireCandidate'
 import EvidenceCardList from '../components/EvidenceCardList'
 import StatusPanel from '../components/system/StatusPanel'
@@ -35,6 +35,12 @@ export default function ScanReveal() {
   // resolved — the authoritative post-run read that closes the window where
   // `expectedSkills` undercounted.
   const [doneCardsSettled, setDoneCardsSettled] = useState(false)
+  // Seeded from the mount-time candidate snapshot, then overwritten by a
+  // fresh getMe() read once the run finishes (see the "done" handler below).
+  // verify_service can flip needs_reconnect mid-run on a revoked token, and
+  // that pre-run snapshot never learns about it on its own — so the banner
+  // must be driven from post-run state, not `candidate?.needs_reconnect`.
+  const [needsReconnect, setNeedsReconnect] = useState(false)
 
   const scanFloorPassed = useRef(false)
   const verificationDone = useRef(false)
@@ -43,7 +49,10 @@ export default function ScanReveal() {
   // Starts the phase machine once identity resolves (`phase === 'idle'` keeps
   // rendering suppressed below until then, same as the old loading gate).
   useEffect(() => {
-    if (candidate) setPhase('scanning')
+    if (candidate) {
+      setPhase('scanning')
+      setNeedsReconnect(candidate.needs_reconnect)
+    }
   }, [candidate])
 
   function tryEnterRevealing() {
@@ -139,6 +148,15 @@ export default function ScanReveal() {
           })
         })
         .finally(() => setDoneCardsSettled(true))
+      // The mount-time candidate snapshot can go stale: run_verification may
+      // flip needs_reconnect mid-run (a revoked token discovered only once
+      // the scan actually hits GitHub), and cards themselves only ever carry
+      // a generic redacted failure message, not that specific cause. Re-read
+      // identity now so the reconnect banner reflects what actually happened
+      // during this run.
+      getMe().then((me) => {
+        if (me) setNeedsReconnect(me.needs_reconnect)
+      })
       source.close()
     })
 
@@ -198,7 +216,7 @@ export default function ScanReveal() {
             {phase === 'complete' ? 'Your Evidence Cards' : 'Revealing…'}
           </h1>
 
-          {phase === 'complete' && candidate?.needs_reconnect && (
+          {phase === 'complete' && needsReconnect && (
             <StatusPanel
               theme={{ ink: '#ff4d6a', glow: 'rgba(255,77,106,.28)' }}
               size="sm"
