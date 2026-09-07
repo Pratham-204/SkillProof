@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -78,6 +79,12 @@ MANIFEST_FILENAMES = (
 
 _T = TypeVar("_T")
 _R = TypeVar("_R")
+
+# RealGitHubClient is a process-wide singleton (deps.get_github_client), so its
+# ETag cache lives for the app's whole process lifetime, not one scan — left
+# unbounded it grows forever (cached bodies include full commit diffs). Capped
+# LRU-style so long-running production processes can't leak memory indefinitely.
+_ETAG_CACHE_MAX_SIZE = 2000
 
 
 class GitHubAuthError(Exception):
@@ -266,7 +273,7 @@ class RealGitHubClient(GitHubClient):
         settings = get_settings()
         self._client_id = client_id or settings.github_client_id
         self._client_secret = client_secret or settings.github_client_secret
-        self._etag_cache: dict[str, tuple[str, object, dict]] = {}
+        self._etag_cache: OrderedDict[str, tuple[str, object, dict]] = OrderedDict()
         self._etag_lock = threading.Lock()
         # follow_redirects: a renamed/transferred repo answers at its old path with
         # a 301/302 instead of the resource. Without this, raise_for_status() (which
@@ -574,6 +581,8 @@ class RealGitHubClient(GitHubClient):
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         with self._etag_lock:
             cached_etag, cached_body, cached_links = self._etag_cache.get(cache_key, (None, None, None))
+            if cached_etag:
+                self._etag_cache.move_to_end(cache_key)
         if cached_etag:
             headers["If-None-Match"] = cached_etag
 
@@ -609,6 +618,9 @@ class RealGitHubClient(GitHubClient):
             if etag:
                 with self._etag_lock:
                     self._etag_cache[cache_key] = (etag, body, response.links)
+                    self._etag_cache.move_to_end(cache_key)
+                    if len(self._etag_cache) > _ETAG_CACHE_MAX_SIZE:
+                        self._etag_cache.popitem(last=False)
             return body, response.links
 
 

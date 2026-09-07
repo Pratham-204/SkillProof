@@ -360,6 +360,34 @@ def test_pagination_continues_past_a_304_on_a_cached_first_page():
     assert page2_hits["n"] == 2
 
 
+def test_etag_cache_evicts_oldest_entries_beyond_max_size(monkeypatch):
+    """RealGitHubClient is wired as a process-wide singleton (deps.get_github_client),
+    so an unbounded _etag_cache would grow for the whole process lifetime. Capped at a
+    small size here to prove eviction happens well before a real production run."""
+    monkeypatch.setattr(github_client, "_ETAG_CACHE_MAX_SIZE", 2, raising=False)
+    fetch_counts: dict[str, int] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sha = request.url.path.rsplit("/", 1)[-1]
+        fetch_counts[sha] = fetch_counts.get(sha, 0) + 1
+        etag = f'W/"{sha}"'
+        if request.headers.get("If-None-Match") == etag:
+            return httpx.Response(304)
+        return httpx.Response(200, json={"sha": sha, "commit": {"message": "m"}}, headers={"ETag": etag})
+
+    client = _client(handler)
+
+    client._get_json("token", "/repos/o/r/commits/a")
+    client._get_json("token", "/repos/o/r/commits/b")
+    client._get_json("token", "/repos/o/r/commits/c")  # 3rd insert pushes the cache past max size 2
+
+    assert len(client._etag_cache) == 2  # bounded, not left to grow unboundedly
+
+    client._get_json("token", "/repos/o/r/commits/a")  # 'a' was the oldest entry, evicted first (LRU)
+
+    assert fetch_counts["a"] == 2  # re-fetched fresh rather than served from a (now-evicted) cache entry
+
+
 def test_list_qualifying_commits_treats_409_empty_repo_as_zero_commits():
     """GitHub returns 409 Conflict from an owned repo's /commits endpoint when
     the repo has no commits yet (empty, no default branch) — that must be

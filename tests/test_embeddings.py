@@ -10,6 +10,9 @@ would compare a fake evidence-item vector against a real, cached skill-tag
 vector, which is meaningless. These tests prove that bypass.
 """
 
+import threading
+import time
+
 import numpy as np
 import pytest
 
@@ -97,6 +100,87 @@ def test_restoring_the_real_backend_uses_the_real_disk_cache_again(fake_embeddin
     # Compares against the raw on-disk file directly, proving the cache was
     # actually read rather than recomputed via either backend.
     assert np.array_equal(vector, expected)
+
+
+def test_concurrent_first_calls_construct_the_model_exactly_once(monkeypatch):
+    """A bare @lru_cache around _model() only locks the cache dict, not the
+    wrapped call: concurrent first calls (e.g. two verify scans starting close
+    together right after a deploy) would each see a miss and each fully
+    construct their own (expensive) model in parallel. The lock-guarded
+    lazy-init must serialize construction instead, so only one ever happens."""
+    import sentence_transformers
+
+    if hasattr(embeddings._model, "cache_clear"):
+        embeddings._model.cache_clear()
+    monkeypatch.setattr(embeddings, "_model_instance", None, raising=False)
+    construction_started = threading.Event()
+    release_construction = threading.Event()
+    construction_count = {"n": 0}
+    count_lock = threading.Lock()
+
+    class _FakeModel:
+        pass
+
+    def fake_ctor(name):
+        with count_lock:
+            construction_count["n"] += 1
+        construction_started.set()
+        assert release_construction.wait(timeout=5)
+        return _FakeModel()
+
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", fake_ctor)
+
+    results: list[object] = []
+    results_lock = threading.Lock()
+
+    def call_model():
+        model = embeddings._model()
+        with results_lock:
+            results.append(model)
+
+    threads = [threading.Thread(target=call_model) for _ in range(5)]
+    for t in threads:
+        t.start()
+    assert construction_started.wait(timeout=5)
+    time.sleep(0.05)  # let any thread that would (wrongly) start its own construction do so
+    release_construction.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert construction_count["n"] == 1
+    assert len(results) == 5
+    assert all(r is results[0] for r in results)
+
+
+def test_a_failed_first_call_does_not_wedge_future_calls(monkeypatch):
+    """A raising first call must not be cached as if it were a successful load
+    (the way a plain module-level singleton assigned unconditionally would) —
+    a later call, once the transient issue clears, must retry and succeed."""
+    import sentence_transformers
+
+    if hasattr(embeddings._model, "cache_clear"):
+        embeddings._model.cache_clear()
+    monkeypatch.setattr(embeddings, "_model_instance", None, raising=False)
+    calls = {"n": 0}
+
+    class _FakeModel:
+        pass
+
+    def fake_ctor(name):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient load failure")
+        return _FakeModel()
+
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", fake_ctor)
+
+    with pytest.raises(RuntimeError):
+        embeddings._model()
+
+    model = embeddings._model()
+
+    assert isinstance(model, _FakeModel)
+    assert calls["n"] == 2
 
 
 def test_fake_backend_is_a_real_embeddings_backend_adapter():

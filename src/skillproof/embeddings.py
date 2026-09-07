@@ -1,19 +1,33 @@
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 import numpy as np
 
 from skillproof.config import get_settings
 
+_model_lock = threading.Lock()
+_model_instance = None
 
-@lru_cache
+
 def _model():
-    # Imported lazily so modules that don't need embeddings (e.g. simple
-    # unit tests) don't pay the sentence-transformers import cost.
-    from sentence_transformers import SentenceTransformer
+    # A bare @lru_cache here only locks the cache dict itself, not the call it
+    # guards: concurrent first calls (e.g. two verify scans starting close
+    # together right after a deploy) would all see a miss and each construct
+    # their own multi-hundred-MB SentenceTransformer in parallel. Holding the
+    # lock across construction serializes that instead, and leaving
+    # _model_instance unset on a raise (rather than caching the exception)
+    # means a transient load failure doesn't wedge every future call.
+    global _model_instance
+    if _model_instance is None:
+        with _model_lock:
+            if _model_instance is None:
+                # Imported lazily so modules that don't need embeddings (e.g. simple
+                # unit tests) don't pay the sentence-transformers import cost.
+                from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(get_settings().embedding_model_name)
+                _model_instance = SentenceTransformer(get_settings().embedding_model_name)
+    return _model_instance
 
 
 class EmbeddingsBackend(ABC):
