@@ -237,6 +237,18 @@ def test_toggle_searchable_requires_a_session(client):
     assert response.status_code == 401
 
 
+def test_update_searchable_is_rate_limited_per_ip(client, fake_github):
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    _connect(client)
+
+    for _ in range(20):
+        response = client.patch("/auth/github/me/searchable", json={"searchable": True})
+        assert response.status_code == 200
+
+    throttled = client.patch("/auth/github/me/searchable", json={"searchable": True})
+    assert throttled.status_code == 429
+
+
 def test_verify_rejects_unknown_skill_tag(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     _connect(client)

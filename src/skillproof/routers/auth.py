@@ -9,6 +9,7 @@ from skillproof.config import get_settings
 from skillproof.db import get_db
 from skillproof.deps import get_current_candidate, get_github_client, get_session_by_cookie
 from skillproof.github_client import GitHubAuthError, GitHubClient
+from skillproof.limiter import limiter
 from skillproof.models import Candidate, CandidateSession
 from skillproof.schemas import CandidateOut, SearchableUpdate
 
@@ -150,13 +151,22 @@ def me(candidate: Candidate = Depends(get_current_candidate)) -> CandidateOut:
 
 
 @router.patch("/me/searchable", response_model=CandidateOut)
+@limiter.limit("20/minute")
 def update_searchable(
+    request: Request,
     payload: SearchableUpdate,
     candidate: Candidate = Depends(get_current_candidate),
     db: Session = Depends(get_db),
 ) -> CandidateOut:
     """Lets a Candidate flip `searchable` on its own, without a full `/verify`
-    call — identity comes from the session (ADR-0006), same as `/verify`."""
+    call — identity comes from the session (ADR-0006), same as `/verify`.
+
+    A session-authenticated write is cheap per call, but nothing else stops a
+    replayed/leaked session cookie from hitting it in a tight unbounded loop
+    (unlike GET /search, this previously had no limiter at all); a literal
+    limit (rather than a config.py setting like search_rate_limit) is fine
+    here since this route has no product reason to ever be tuned per-deploy.
+    """
     candidate.searchable = payload.searchable
     db.commit()
     return CandidateOut.model_validate(candidate)
