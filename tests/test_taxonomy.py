@@ -6,6 +6,11 @@ test_api_flow.py) — the one exception is the `/skills` response-shape check,
 which only makes sense as an HTTP-level assertion.
 """
 
+import json
+import os
+import threading
+import time
+
 from skillproof import taxonomy
 
 REMOVED_PRACTICE_SKILLS = [
@@ -63,3 +68,57 @@ def test_get_skills_endpoint_response_shape_is_unchanged(client, fake_github):
     body = response.json()
     assert len(body) > 0
     assert set(body[0].keys()) == {"name", "category", "description"}
+
+
+def test_reads_reload_after_the_taxonomy_file_changes_on_disk(isolated_taxonomy_file):
+    """Simulates the nightly `taxonomy_growth` batch job — a separate OS process —
+    rewriting `SKILLS_PATH` while this process already has it cached in memory.
+    A real external process has no way to call this process's `_invalidate_caches`,
+    so the cache must notice the file itself changed."""
+    assert taxonomy.is_known_skill("ExternallyPublishedWidget") is False  # populates the cache
+
+    data = json.loads(isolated_taxonomy_file.read_text(encoding="utf-8"))
+    data["skills"].append(
+        {
+            "name": "ExternallyPublishedWidget",
+            "category": "tool",
+            "description": "x",
+            "detection": {"manifest_packages": [], "file_extensions": [], "config_files": [], "content_markers": []},
+        }
+    )
+    data["version"] += 1
+    isolated_taxonomy_file.write_text(json.dumps(data), encoding="utf-8")
+    bumped_mtime = isolated_taxonomy_file.stat().st_mtime + 2
+    os.utime(isolated_taxonomy_file, (bumped_mtime, bumped_mtime))
+
+    assert taxonomy.is_known_skill("ExternallyPublishedWidget") is True
+
+
+def test_append_skill_tags_survives_two_concurrent_writers(isolated_taxonomy_file, monkeypatch):
+    """Two overlapping `publish_new_skill_tags` runs (a cron overrun, or a manual
+    rerun mid-cron — round 8, ADR-0008) must not let the second writer's
+    read-modify-write silently discard the first writer's already-published entry."""
+    original_loads = json.loads
+
+    def slow_loads(*args, **kwargs):
+        result = original_loads(*args, **kwargs)
+        time.sleep(0.05)
+        return result
+
+    monkeypatch.setattr(json, "loads", slow_loads)
+    original_version = taxonomy.taxonomy_version()
+    barrier = threading.Barrier(2)
+
+    def publish(name: str) -> None:
+        barrier.wait(timeout=5)
+        taxonomy.append_skill_tags([taxonomy.SkillTag(name=name, category="tool", description="x")])
+
+    threads = [threading.Thread(target=publish, args=(name,)) for name in ("ConcurrentWidgetA", "ConcurrentWidgetB")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert taxonomy.is_known_skill("ConcurrentWidgetA")
+    assert taxonomy.is_known_skill("ConcurrentWidgetB")
+    assert taxonomy.taxonomy_version() == original_version + 2

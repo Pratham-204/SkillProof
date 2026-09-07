@@ -1,4 +1,7 @@
 import json
+import os
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -50,6 +53,26 @@ class UnknownSkillTagError(ValueError):
         self.skill = skill
 
 
+_taxonomy_mtime_ns: int | None = None
+
+
+def _ensure_fresh() -> None:
+    """Every public read of the taxonomy calls this first. `taxonomy_growth_cli`'s
+    nightly batch job (round 8, ADR-0008) runs as a separate OS process and writes
+    `SKILLS_PATH` directly — this process's `@lru_cache`s have no other signal that
+    happened, so each public accessor checks the file's mtime and clears every
+    cache the moment it has moved, instead of serving a stale taxonomy for the
+    rest of this process's life. Has to run outside every `@lru_cache`'d function
+    it guards: once one of those is warm, calling it again never re-executes its
+    body, so a check placed inside one would simply stop firing after the first
+    call."""
+    global _taxonomy_mtime_ns
+    mtime_ns = SKILLS_PATH.stat().st_mtime_ns
+    if _taxonomy_mtime_ns is not None and mtime_ns != _taxonomy_mtime_ns:
+        _invalidate_caches()
+    _taxonomy_mtime_ns = mtime_ns
+
+
 @lru_cache
 def _taxonomy_file() -> dict:
     return json.loads(SKILLS_PATH.read_text(encoding="utf-8"))
@@ -58,6 +81,7 @@ def _taxonomy_file() -> dict:
 def taxonomy_version() -> int:
     """The version stamp a re-verification compares an Evidence Card's own
     `taxonomy_version` against, to decide overwrite-in-place vs fork (ADR-0005)."""
+    _ensure_fresh()
     return _taxonomy_file()["version"]
 
 
@@ -87,10 +111,10 @@ def _raw_skills() -> list[SkillTag]:
 
 
 def list_skills() -> list[SkillTag]:
+    _ensure_fresh()
     return _raw_skills()
 
 
-@lru_cache
 def all_detection_pattern_config_files() -> frozenset[str]:
     """The union of every Skill Tag's config-file Detection Pattern entries.
 
@@ -99,14 +123,25 @@ def all_detection_pattern_config_files() -> frozenset[str]:
     Skill Tag (e.g. `docker-compose.yml` for Docker), even when that file's
     extension would otherwise read as pure config noise.
     """
-    return frozenset(cf for skill in _raw_skills() for cf in skill.detection_pattern.config_files)
+    _ensure_fresh()
+    return _all_detection_pattern_config_files()
 
 
 @lru_cache
+def _all_detection_pattern_config_files() -> frozenset[str]:
+    return frozenset(cf for skill in _raw_skills() for cf in skill.detection_pattern.config_files)
+
+
 def known_manifest_package_names() -> frozenset[ManifestPackage]:
     """(ecosystem, lowercased package name) pairs already covered by some Skill
     Tag's Detection Pattern. `sightings.record_sightings` diffs a repo's declared
     packages against this to find genuinely unrecognized ones (round 8, ADR-0008)."""
+    _ensure_fresh()
+    return _known_manifest_package_names()
+
+
+@lru_cache
+def _known_manifest_package_names() -> frozenset[ManifestPackage]:
     return frozenset(
         ManifestPackage(ecosystem=pkg.ecosystem, name=pkg.name.lower())
         for skill in _raw_skills()
@@ -132,32 +167,65 @@ def _serialize_skill_tag(skill: SkillTag) -> dict:
     }
 
 
+_LOCK_TIMEOUT_SECONDS = 10.0
+_LOCK_POLL_INTERVAL_SECONDS = 0.02
+
+
+@contextmanager
+def _taxonomy_file_lock():
+    """A cross-process mutex around the read-modify-write below. `O_EXCL` sentinel-
+    file creation is atomic on both Windows and POSIX, unlike a POSIX-only
+    `fcntl.flock` — needed because `taxonomy_growth`'s nightly batch job can overlap
+    itself (a cron overrun, or an operator rerunning it manually mid-cron); without
+    this, two concurrent read-modify-writes silently drop whichever writer's
+    `SKILLS_PATH.write_text` lands first, even though both already committed their
+    own `SightingDecision` rows as published (round 8, ADR-0008)."""
+    lock_path = SKILLS_PATH.with_name(SKILLS_PATH.name + ".lock")
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"Timed out waiting for the taxonomy file lock at {lock_path}") from None
+            time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
+    try:
+        os.close(fd)
+        yield
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
 def append_skill_tags(skills: list[SkillTag]) -> None:
     """Appends new Skill Tags and bumps `version` once, in a single file write —
     `taxonomy_growth`'s batch publish job calls this at most once per run, after
     every entry it's publishing this run has cleared every guard (round 8,
     ADR-0008). Clears every taxonomy cache afterward so the new entries (and their
     embeddings, via the existing self-healing `_embeddings_cache`) are visible
-    immediately within this process. A separately running app process still needs
-    its own restart to see them — same as any other taxonomy edit today;
-    `_taxonomy_file` has no cross-process invalidation."""
-    data = json.loads(SKILLS_PATH.read_text(encoding="utf-8"))
-    data["skills"].extend(_serialize_skill_tag(s) for s in skills)
-    data["version"] += 1
-    SKILLS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    immediately within this process; a separately running app process picks them
+    up on its own next read, via `_ensure_fresh`'s mtime check."""
+    with _taxonomy_file_lock():
+        data = json.loads(SKILLS_PATH.read_text(encoding="utf-8"))
+        data["skills"].extend(_serialize_skill_tag(s) for s in skills)
+        data["version"] += 1
+        SKILLS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     _invalidate_caches()
 
 
 def _invalidate_caches() -> None:
+    global _taxonomy_mtime_ns
+    _taxonomy_mtime_ns = None
     _taxonomy_file.cache_clear()
     _raw_skills.cache_clear()
     _skill_index.cache_clear()
-    all_detection_pattern_config_files.cache_clear()
-    known_manifest_package_names.cache_clear()
+    _all_detection_pattern_config_files.cache_clear()
+    _known_manifest_package_names.cache_clear()
     _embeddings_cache.cache_clear()
 
 
 def is_known_skill(name: str) -> bool:
+    _ensure_fresh()
     return name in _skill_index()
 
 
@@ -167,6 +235,7 @@ def _skill_index() -> dict[str, SkillTag]:
 
 
 def get_skill(name: str) -> SkillTag:
+    _ensure_fresh()
     tag = _skill_index().get(name)
     if tag is None:
         raise UnknownSkillTagError(name)

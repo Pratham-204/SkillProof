@@ -7,6 +7,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 import httpx
 
@@ -17,27 +18,27 @@ class RegistryClient(ABC):
 
 
 def _npm_url(name: str) -> str:
-    return f"https://registry.npmjs.org/{name}"
+    return f"https://registry.npmjs.org/{quote(name, safe='')}"
 
 
 def _pip_url(name: str) -> str:
-    return f"https://pypi.org/pypi/{name}/json"
+    return f"https://pypi.org/pypi/{quote(name, safe='')}/json"
 
 
 def _gem_url(name: str) -> str:
-    return f"https://rubygems.org/api/v1/gems/{name}.json"
+    return f"https://rubygems.org/api/v1/gems/{quote(name, safe='')}.json"
 
 
 def _composer_url(name: str) -> str:
-    return f"https://repo.packagist.org/p2/{name}.json"
+    return f"https://repo.packagist.org/p2/{quote(name, safe='')}.json"
 
 
 def _hex_url(name: str) -> str:
-    return f"https://hex.pm/api/packages/{name}"
+    return f"https://hex.pm/api/packages/{quote(name, safe='')}"
 
 
 def _pub_url(name: str) -> str:
-    return f"https://pub.dev/api/packages/{name}"
+    return f"https://pub.dev/api/packages/{quote(name, safe='')}"
 
 
 _LOOKUP_URL_BY_ECOSYSTEM: dict[str, Callable[[str], str]] = {
