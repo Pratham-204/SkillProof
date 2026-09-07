@@ -1,15 +1,19 @@
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from skillproof import version
-from skillproof.db import init_db
+from skillproof.db import engine, init_db
 from skillproof.limiter import limiter
 from skillproof.routers import auth, evidence_card, explain, search, taxonomy, verify
 
@@ -33,12 +37,35 @@ async def lifespan(app: FastAPI):
     yield
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Baseline anti-clickjacking/anti-sniffing headers on every response —
+    nothing in the app set any of these before, leaving the SPA framable by
+    any origin (see the OAuth-callback/searchable-toggle clickjacking risk)."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
+
 def create_app() -> FastAPI:
+    # uvicorn's own logging dictConfig only ever attaches handlers to its own
+    # 'uvicorn'/'uvicorn.error'/'uvicorn.access' loggers, never to root — left
+    # unconfigured, every skillproof.* logger call fell through to logging's
+    # bare last-resort handler (WARNING+ only, no timestamp/level/name).
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     app = FastAPI(title="SkillProof", lifespan=lifespan)
 
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
     app.add_middleware(SlowAPIMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
 
     app.include_router(auth.router)
     app.include_router(taxonomy.router)
@@ -48,11 +75,22 @@ def create_app() -> FastAPI:
     app.include_router(search.router)
 
     @app.get("/health", include_in_schema=False)
-    def health() -> dict[str, str]:
+    def health(response: Response) -> dict[str, str]:
         """Reports which commit this container was actually built from, so a
         deploy can be verified instead of assumed (see `version.deployed_sha`).
         Registered before the SPA catch-all below, which would otherwise
-        swallow this path and hand back index.html."""
+        swallow this path and hand back index.html.
+
+        Also runs a cheap SELECT 1 against the configured DB engine: this is
+        the only liveness signal Railway's health probe ever sees, so an
+        unconditional 200 would keep routing traffic to (and never restart)
+        an instance whose database is actually unreachable."""
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            response.status_code = 503
+            return {"status": "degraded", "git_sha": version.deployed_sha()}
         return {"status": "ok", "git_sha": version.deployed_sha()}
 
     if FRONTEND_DIST.is_dir():

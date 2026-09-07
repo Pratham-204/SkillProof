@@ -5,7 +5,12 @@ monkeypatch, so this is deterministic in CI (which never runs `npm run build`
 before the backend job) and locally alike.
 """
 
+import logging
+
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.pool import StaticPool
 
 from skillproof import main
 
@@ -88,3 +93,75 @@ def test_serve_landing_page_is_unaffected(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.text == "<html>landing</html>"
+
+
+def test_security_headers_are_present_on_every_response(tmp_path, monkeypatch):
+    """No CSP/X-Frame-Options anywhere left the SPA framable and every
+    response missing baseline anti-sniffing/anti-clickjacking headers."""
+    client, _ = _build_app(tmp_path, monkeypatch)
+
+    response = client.get("/dashboard")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+
+
+def test_health_returns_ok_when_db_is_reachable(monkeypatch):
+    fake_engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    monkeypatch.setattr(main, "engine", fake_engine)
+    client = TestClient(main.create_app())
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_health_reports_degraded_when_db_is_unreachable(monkeypatch):
+    """GET /health previously returned an unconditional 200 with no DB check
+    at all, so Railway kept routing traffic to (and never restarted) an
+    instance whose database was actually unreachable."""
+
+    class _BrokenEngine:
+        def connect(self):
+            raise SQLAlchemyError("simulated database outage")
+
+    monkeypatch.setattr(main, "engine", _BrokenEngine())
+    client = TestClient(main.create_app())
+
+    response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+
+
+def test_create_app_configures_logging_so_skillproof_loggers_get_a_handler():
+    """Without this, uvicorn's own logging dictConfig only ever attaches
+    handlers to its own 'uvicorn'/'uvicorn.error'/'uvicorn.access' loggers —
+    root stays at handlers=[], so every skillproof.* logger.info call (and
+    the warning/exception calls' timestamp/level/name context) is silently
+    dropped instead of reaching stdout."""
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    original_level = root.level
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+
+    try:
+        main.create_app()
+
+        assert root.handlers, "create_app() must configure a handler on the root logger"
+        formatter = root.handlers[0].formatter
+        fmt = formatter._fmt if formatter is not None else ""
+        assert "asctime" in fmt
+        assert "levelname" in fmt
+        assert "name" in fmt
+    finally:
+        for handler in root.handlers[:]:
+            root.removeHandler(handler)
+        for handler in original_handlers:
+            root.addHandler(handler)
+        root.setLevel(original_level)
