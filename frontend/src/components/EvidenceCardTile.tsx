@@ -1,5 +1,5 @@
-import { motion } from 'framer-motion'
-import { useState } from 'react'
+import { motion, useReducedMotion } from 'framer-motion'
+import { useId, useState } from 'react'
 import { explainSkill, type EvidenceCard } from '../api'
 import {
   evidenceBadgeClassName,
@@ -9,11 +9,25 @@ import {
   isWeakEvidence,
 } from '../lib/evidence'
 import ScoreCounter from './ScoreCounter'
+import StatusPanel from './system/StatusPanel'
+import RankBadge from './system/RankBadge'
+import { RANK_THEME, scoreToRank, type RankTheme } from './system/rank'
 
 const cardVariants = {
   hidden: { opacity: 0, y: 16, scale: 0.97 },
   visible: { opacity: 1, y: 0, scale: 1 },
 }
+
+// Same start/end state so the mount "animation" is a visual no-op for
+// prefers-reduced-motion users, without needing an app-wide <MotionConfig>.
+const reducedMotionCardVariants = {
+  hidden: { opacity: 1, y: 0, scale: 1 },
+  visible: { opacity: 1, y: 0, scale: 1 },
+}
+
+// `ink` routes through the real --color-danger token instead of retyping its
+// hex value; keeps this file's one failed-card literal from drifting further.
+const DANGER_THEME: RankTheme = { ink: 'var(--color-danger)', glow: 'rgba(255,77,106,.3)' }
 
 interface EvidenceCardTileProps {
   card: EvidenceCard
@@ -30,20 +44,26 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
   const [isFallback, setIsFallback] = useState(card.explanation_is_fallback)
   const [explaining, setExplaining] = useState(false)
   const [explainError, setExplainError] = useState<string | null>(null)
+  const prefersReducedMotion = useReducedMotion()
+  const variants = prefersReducedMotion ? reducedMotionCardVariants : cardVariants
+  const detailsId = useId()
 
   if (card.status === 'failed') {
     return (
-      <motion.li
-        variants={cardVariants}
-        className="rounded-xl border border-red-300 bg-red-50 p-4 text-left dark:border-red-900 dark:bg-red-950/40"
-      >
-        <p className="font-medium">{card.skill}</p>
-        <p className="mt-1 text-sm text-red-700 dark:text-red-400">{card.error ?? 'Verification failed.'}</p>
+      <motion.li variants={variants} className="list-none">
+        <StatusPanel theme={DANGER_THEME} className="text-left">
+          <div className="p-4">
+            <p className="font-display text-lg font-semibold text-danger-ink">{card.skill}</p>
+            <p className="mt-1 text-sm text-danger-ink/80">{card.error ?? 'Verification failed.'}</p>
+          </div>
+        </StatusPanel>
       </motion.li>
     )
   }
 
   const isWeak = isWeakEvidence(card.evidence_type)
+  const rank = scoreToRank(card.confidence_score, card.evidence_type)
+  const rankTheme = RANK_THEME[rank]
 
   // A real explanation is fetched once per mount and held in this tile's own
   // state — re-expanding never re-fetches on top of it. A fallback explanation
@@ -52,72 +72,103 @@ export default function EvidenceCardTile({ card, candidateId }: EvidenceCardTile
   // (routers/explain.py) — otherwise a card that cached a fallback before the
   // LLM came back up would show stale template text forever, since `explanation`
   // is never null once the backend has cached anything at all.
+  function fetchExplanation() {
+    setExplaining(true)
+    setExplainError(null)
+    explainSkill(candidateId, card.skill)
+      .then((res) => {
+        setExplanation(res.explanation)
+        setIsFallback(res.explanation_is_fallback)
+      })
+      .catch((err) => setExplainError(err instanceof Error ? err.message : 'Could not load explanation.'))
+      .finally(() => setExplaining(false))
+  }
+
   function handleToggle() {
     const opening = !expanded
     setExpanded(opening)
     if (opening && (explanation === null || isFallback) && !explaining) {
-      setExplaining(true)
-      setExplainError(null)
-      explainSkill(candidateId, card.skill)
-        .then((res) => {
-          setExplanation(res.explanation)
-          setIsFallback(res.explanation_is_fallback)
-        })
-        .catch((err) => setExplainError(err instanceof Error ? err.message : 'Could not load explanation.'))
-        .finally(() => setExplaining(false))
+      fetchExplanation()
     }
   }
 
   return (
-    <motion.li variants={cardVariants} className={evidenceCardClassName(isWeak)}>
-      <button type="button" onClick={handleToggle} className="flex w-full items-start justify-between gap-3 text-left">
-        <span className="flex items-center gap-2">
-          <span className="font-medium">{card.skill}</span>
-          <span className={evidenceBadgeClassName(card.evidence_type)}>{evidenceBadgeLabel(card.evidence_type)}</span>
-        </span>
-        <ScoreCounter score={card.confidence_score} className={`text-lg ${isWeak ? 'opacity-60' : ''}`} />
-      </button>
-      <p className={`mt-1 text-xs ${isWeak ? 'text-neutral-500' : 'text-neutral-600 dark:text-neutral-400'}`}>
-        {evidenceTypeSummary(card.evidence_type, card.source_commits.length)}
-      </p>
+    <motion.li variants={variants} className="list-none">
+      <StatusPanel theme={rankTheme} className={evidenceCardClassName(isWeak)}>
+        <button
+          type="button"
+          onClick={handleToggle}
+          aria-expanded={expanded}
+          aria-controls={detailsId}
+          className="focus-visible:outline-accent flex w-full items-start justify-between gap-3 text-left transition-[filter] duration-150 hover:brightness-110 focus-visible:brightness-110 active:brightness-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+        >
+          <span className="flex min-w-0 items-center gap-3">
+            <RankBadge rank={rank} size="sm" />
+            <span className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="break-words font-display text-lg font-semibold tracking-wide">{card.skill}</span>
+              <span className={evidenceBadgeClassName(card.evidence_type)}>{evidenceBadgeLabel(card.evidence_type)}</span>
+            </span>
+          </span>
+          <ScoreCounter score={card.confidence_score} className="text-xl" />
+        </button>
+        <p className="mt-1 text-xs text-ink-dim">
+          {evidenceTypeSummary(card.evidence_type, card.source_commits.length)}
+        </p>
 
-      {expanded && (
-        <div className="mt-3 flex flex-col gap-3 border-t border-neutral-200 pt-3 dark:border-neutral-800">
-          {card.source_commits.length > 0 && (
-            <ul className="flex flex-col gap-1">
-              {card.source_commits.map((ref) =>
-                ref.private ? (
-                  <li key={`${ref.kind}-${ref.ref}`} className="text-neutral-500">
-                    {ref.kind === 'commit' ? 'Commit' : 'PR comment'} in {ref.repo}
-                  </li>
-                ) : (
-                  <li key={`${ref.kind}-${ref.ref}`} className="font-mono text-xs">
-                    <a href={ref.url} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:opacity-70">
-                      {ref.kind === 'commit' ? 'commit' : 'PR comment'} {ref.ref.slice(0, 7)}
-                    </a>
-                    <span className="ml-2 text-neutral-400">{ref.repo}</span>
-                  </li>
-                ),
-              )}
-            </ul>
-          )}
-
-          <div className="text-sm">
-            {explaining && <p className="text-neutral-400 italic">Generating explanation…</p>}
-            {explainError && <p className="text-red-600 dark:text-red-400">{explainError}</p>}
-            {explanation && (
-              <p>
-                {explanation}
-                {isFallback && (
-                  <span className="ml-2 rounded-full bg-neutral-100 px-2 py-0.5 font-mono text-[0.65rem] uppercase tracking-wide text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
-                    template fallback
-                  </span>
+        {expanded && (
+          <div id={detailsId} className="mt-3 flex flex-col gap-3 border-t border-edge pt-3">
+            {card.source_commits.length > 0 && (
+              <ul className="flex flex-col gap-1">
+                {card.source_commits.map((ref) =>
+                  ref.private ? (
+                    <li key={`${ref.kind}-${ref.ref}`} className="font-mono text-xs text-ink-dim">
+                      {ref.kind === 'commit' ? 'Commit' : 'PR comment'} in {ref.repo}
+                    </li>
+                  ) : (
+                    <li key={`${ref.kind}-${ref.ref}`} className="font-mono text-xs">
+                      <a
+                        href={ref.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-accent-ink focus-visible:outline-accent underline underline-offset-2 transition hover:opacity-70 active:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                      >
+                        {ref.kind === 'commit' ? 'commit' : 'PR comment'} {ref.ref.slice(0, 7)}
+                      </a>
+                      <span className="ml-2 text-ink-dim">{ref.repo}</span>
+                    </li>
+                  ),
                 )}
-              </p>
+              </ul>
             )}
+
+            <div className="text-sm">
+              {explaining && <p className="italic text-ink-dim">Generating explanation…</p>}
+              {explainError && (
+                <p className="text-danger-ink">
+                  {explainError}{' '}
+                  <button
+                    type="button"
+                    onClick={fetchExplanation}
+                    className="focus-visible:outline-accent underline underline-offset-2 transition hover:opacity-70 active:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                  >
+                    Retry
+                  </button>
+                </p>
+              )}
+              {explanation && (
+                <p>
+                  {explanation}
+                  {isFallback && (
+                    <span className="ml-2 rounded-full border border-edge bg-surface-2 px-2 py-0.5 font-mono text-[0.65rem] uppercase tracking-wide text-ink-dim">
+                      template fallback
+                    </span>
+                  )}
+                </p>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </StatusPanel>
     </motion.li>
   )
 }

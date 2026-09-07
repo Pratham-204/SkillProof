@@ -1,41 +1,35 @@
 @import "tailwindcss";
 
-/* Palette and type shared with the marketing landing page — see the
-   SkillProof artifact this was matched against. Accent/surface tokens are
-   defined once here and redefined under prefers-color-scheme so every
-   `bg-accent`/`text-on-accent`/etc. utility switches automatically; no
-   `dark:` variant is needed for them the way Tailwind's literal `neutral-*`
-   classes elsewhere in the app still require one. */
+/* "Hunter Status Window" system — SkillProof's visual identity is a dark
+   HUD: a Candidate's real GitHub signals (Presence/Volume/Depth/Span →
+   Confidence Score) rendered the way a stat-tracking game renders a
+   character sheet. There is deliberately no light variant: the glow *is*
+   the identity, and a light background can't carry it. All chrome below
+   (panel corners, rank colors, glow) is original CSS/SVG — no third-party
+   art assets. */
 @theme {
-  --font-wordmark: "Fraunces", ui-serif, Georgia, serif;
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Rajdhani", ui-sans-serif, sans-serif;
+  --font-sans: "Sora", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
 
-  --color-bg: #eff3ee;
-  --color-surface: #fbfcf9;
-  --color-surface-2: #e4e9e1;
-  --color-ink: #14211d;
-  --color-accent: #1f7a5c;
-  --color-accent-ink: #145c43;
-  --color-accent-soft: #dceee4;
-  --color-on-accent: #ffffff;
+  --color-bg: #05070d;
+  --color-surface: #0b0f1c;
+  --color-surface-2: #121a2e;
+  --color-edge: #1c2b45;
+  --color-ink: #e8f4ff;
+  --color-ink-dim: #7f93b0;
+  --color-accent: #4dd8ff;
+  --color-accent-ink: #bff0ff;
+  --color-accent-soft: #12324a;
+  --color-on-accent: #05070d;
+  --color-danger: #ff4d6a;
+  --color-danger-soft: #3a1420;
+  --color-danger-ink: #ffb4c2;
+  --color-gold: #ffd76a;
 }
 
 :root {
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-bg: #0e1512;
-    --color-surface: #141f1a;
-    --color-surface-2: #1b2a23;
-    --color-ink: #e9f1ea;
-    --color-accent: #3fcb93;
-    --color-accent-ink: #7fe4b8;
-    --color-accent-soft: #163b2c;
-    --color-on-accent: #0e1512;
-  }
+  color-scheme: dark;
 }
 
 body {
@@ -43,9 +37,127 @@ body {
   font-family: var(--font-sans);
   background: var(--color-bg);
   color: var(--color-ink);
+  min-height: 100svh;
+  /* A faint fixed vignette + scanline field — the one ambient texture that
+     appears everywhere, kept quiet on purpose so the ScanReveal sequence
+     (the page's one deliberate, orchestrated motion) stays the memorable
+     thing rather than competing with a busy background everywhere else. */
+  background-image:
+    repeating-linear-gradient(180deg, rgba(77, 216, 255, 0.025) 0 1px, transparent 1px 3px),
+    radial-gradient(120% 90% at 50% -10%, rgba(77, 216, 255, 0.08), transparent 60%);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-ink);
+}
+
+/* Global keyboard-focus indicator. Written unlayered (outside any @layer),
+   so per CSS cascade rules it beats anything Tailwind emits in its own
+   `@layer utilities` — including SkillPicker's `outline-none` utility —
+   regardless of selector order or specificity. This is the one focus ring
+   for every interactive control in the app (links, buttons, checkboxes,
+   inputs); nothing else needs its own focus styling. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 /* Every animated/counting number (score count-up, commit counts, day spans)
    must use Tailwind's built-in `tabular-nums` utility — without it, digit
    widths change as the value animates and the number visibly jitters left
    and right instead of just counting up. */
+
+/* ---------- Status Window chrome ---------------------------------------
+   Angular, clipped-corner panels replace the generic rounded-card-with-
+   soft-shadow default. `--sp-edge`/`--sp-glow` are set per-instance (via
+   inline style, driven by rank/tier) so one class works for every glow
+   intensity from "dormant" to "S-rank". */
+.status-panel {
+  --sp-edge: var(--color-edge);
+  --sp-glow: transparent;
+  position: relative;
+  background: var(--color-surface);
+  border: 1px solid var(--sp-edge);
+  clip-path: polygon(
+    14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px
+  );
+  box-shadow: 0 0 0 1px transparent, 0 0 32px -12px var(--sp-glow);
+  transition: box-shadow 0.3s ease, border-color 0.3s ease;
+}
+
+.status-panel::after {
+  /* corner ticks — a thin bracket stroke at the two clipped corners, the
+     detail that reads as "instrument panel" rather than "just a cut corner" */
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(135deg, var(--sp-edge) 0 14px, transparent 14px) top left / 20px 20px no-repeat,
+    linear-gradient(-45deg, var(--sp-edge) 0 14px, transparent 14px) bottom right / 20px 20px no-repeat;
+  opacity: 0.9;
+}
+
+.status-panel--sm {
+  clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px);
+}
+
+/* ---------- Rank hex badge ---------------------------------------------- */
+.rank-badge {
+  --rb-ink: var(--color-ink-dim);
+  --rb-glow: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--rb-ink);
+  background: color-mix(in srgb, var(--rb-ink) 12%, var(--color-bg));
+  clip-path: polygon(25% 4%, 75% 4%, 100% 50%, 75% 96%, 25% 96%, 0% 50%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--rb-ink) 55%, transparent) inset,
+    0 0 18px -4px var(--rb-glow);
+}
+
+/* The rank letter (E/D/C/B/A/S) is drawn as generated content rather than a
+   real text node on purpose: it's a compact glyph, not prose, and several of
+   its possible values are single letters that can otherwise collide with
+   unrelated visible text elsewhere on the page (a skill tag, a test
+   fixture). aria-label on the element itself still gives it a real
+   accessible name. */
+.rank-badge::before {
+  content: attr(data-rank);
+  font-family: var(--font-display);
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .system-glow-pulse {
+    animation: system-glow-pulse 2.4s ease-in-out infinite;
+  }
+
+  /* Applied directly to a heading (no wrapping span) so a materializing
+     reveal never risks turning one text assertion into two ambiguous DOM
+     matches (parent + child both containing the identical string). */
+  .reveal-in {
+    animation: reveal-in 0.6s steps(20, end) both;
+  }
+}
+
+@keyframes reveal-in {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes system-glow-pulse {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.18);
+  }
+}

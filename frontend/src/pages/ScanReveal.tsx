@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from 'react'
 import { GITHUB_LOGIN_URL, getEvidenceCard, type EvidenceCard as EvidenceCardType } from '../api'
 import { useRequireCandidate } from '../hooks/useRequireCandidate'
 import EvidenceCardList from '../components/EvidenceCardList'
+import StatusPanel from '../components/system/StatusPanel'
+import SystemText from '../components/system/SystemText'
 
 type Phase = 'idle' | 'scanning' | 'revealing' | 'complete'
 
@@ -53,10 +55,19 @@ export default function ScanReveal() {
   useEffect(() => {
     if (!candidateId) return
     let cancelled = false
-    getEvidenceCard(candidateId).then((evidence) => {
-      if (cancelled) return
-      setExpectedSkills(evidence.cards.filter((c) => c.status === 'processing').map((c) => c.skill))
-    })
+    getEvidenceCard(candidateId)
+      .then((evidence) => {
+        if (cancelled) return
+        setExpectedSkills(evidence.cards.filter((c) => c.status === 'processing').map((c) => c.skill))
+      })
+      .catch(() => {
+        // Same fallback as the "verification finished before this page
+        // loaded" case below: an empty list still lets the completion
+        // effect fall through to "done + at least one card" instead of
+        // blocking on a snapshot that never arrives.
+        if (cancelled) return
+        setExpectedSkills([])
+      })
     return () => {
       cancelled = true
     }
@@ -154,42 +165,53 @@ export default function ScanReveal() {
   return (
     <main className="mx-auto flex min-h-svh max-w-xl flex-col items-center justify-center gap-8 px-6 py-16 text-center">
       {phase === 'scanning' && (
-        <div className="flex flex-col items-center gap-3">
-          <h1 className="font-wordmark text-3xl">Scanning your repos…</h1>
-          {phaseLabel && (
-            <motion.p
-              key={phaseLabel}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="text-accent-ink font-mono text-xs uppercase tracking-wide"
-            >
-              {phaseLabel}
-            </motion.p>
-          )}
-          <ul className="font-mono text-sm text-neutral-500">
-            {scannedRepos.map((repo) => (
-              <motion.li key={repo} initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                {repo}
-              </motion.li>
-            ))}
-          </ul>
+        <div className="flex flex-col items-center gap-4">
+          <p className="text-accent font-mono text-xs tracking-[0.3em]">
+            <SystemText>[ SYSTEM ]</SystemText>
+          </p>
+          <h1 className="reveal-in font-display text-3xl font-semibold tracking-wide">Scanning your repos…</h1>
+          <div aria-live="polite" role="status" className="flex flex-col items-center gap-4">
+            {phaseLabel && (
+              <motion.p
+                key={phaseLabel}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="text-accent-ink font-mono text-xs uppercase tracking-wide"
+              >
+                {phaseLabel}
+              </motion.p>
+            )}
+            <ul className="text-ink-dim flex flex-col gap-1 font-mono text-sm">
+              {scannedRepos.map((repo, i) => (
+                <motion.li key={repo} initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+                  <SystemText delayMs={i * 60}>{`> ${repo}`}</SystemText>
+                </motion.li>
+              ))}
+            </ul>
+          </div>
         </div>
       )}
 
       {(phase === 'revealing' || phase === 'complete') && (
         <div className="w-full">
-          <h1 className="font-wordmark mb-6 text-3xl">
+          <h1 key={phase} className="reveal-in font-display mb-6 text-3xl font-semibold tracking-wide">
             {phase === 'complete' ? 'Your Evidence Cards' : 'Revealing…'}
           </h1>
 
           {phase === 'complete' && candidate?.needs_reconnect && (
-            <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
-              Your GitHub access was revoked, so this run used stale data.{' '}
-              <a href={GITHUB_LOGIN_URL} className="font-medium underline underline-offset-2">
-                Reconnect GitHub
-              </a>{' '}
-              to re-verify with fresh access.
-            </p>
+            <StatusPanel
+              theme={{ ink: '#ff4d6a', glow: 'rgba(255,77,106,.28)' }}
+              size="sm"
+              className="mb-4 p-3 text-left text-sm"
+            >
+              <span className="text-danger-ink">
+                Your GitHub access was revoked, so this run used stale data.{' '}
+                <a href={GITHUB_LOGIN_URL} className="font-medium underline underline-offset-2 hover:opacity-70">
+                  Reconnect GitHub
+                </a>{' '}
+                to re-verify with fresh access.
+              </span>
+            </StatusPanel>
           )}
 
           <EvidenceCardList cards={cards} candidateId={candidateId ?? ''} />

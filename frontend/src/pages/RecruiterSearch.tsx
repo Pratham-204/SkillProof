@@ -3,6 +3,9 @@ import { Link } from 'react-router-dom'
 import { RateLimitedError, listSkills, searchCandidates, type SearchResult, type SkillTag } from '../api'
 import ScoreCounter from '../components/ScoreCounter'
 import SkillPicker from '../components/SkillPicker'
+import StatusPanel from '../components/system/StatusPanel'
+import RankBadge from '../components/system/RankBadge'
+import { RANK_THEME, scoreToRank } from '../components/system/rank'
 import {
   evidenceBadgeClassName,
   evidenceBadgeLabel,
@@ -44,10 +47,9 @@ export default function RecruiterSearch() {
   return (
     <main className="mx-auto flex min-h-svh max-w-xl flex-col items-center gap-8 px-6 py-16">
       <div className="text-center">
-        <h1 className="font-wordmark text-3xl">Find candidates</h1>
-        <p className="mt-1 text-neutral-500">
-          Search by verified skills — results must match every skill selected.
-        </p>
+        <p className="text-accent mb-1 font-mono text-xs tracking-[0.3em]">[ GUILD REQUEST BOARD ]</p>
+        <h1 className="font-display text-3xl font-semibold tracking-wide">Find candidates</h1>
+        <p className="text-ink-dim mt-1">Search by verified skills — results must match every skill selected.</p>
       </div>
 
       <form onSubmit={handleSubmit} className="flex w-full flex-col items-center gap-4">
@@ -59,72 +61,83 @@ export default function RecruiterSearch() {
         <button
           type="submit"
           disabled={selectedSkills.length === 0 || status === 'loading'}
-          className="bg-accent text-on-accent w-full rounded-full px-6 py-3 font-medium transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          className="bg-accent text-on-accent w-full rounded-full px-6 py-3 font-medium shadow-[0_0_24px_-6px_var(--color-accent)] transition hover:opacity-90 active:scale-[0.98] active:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
         >
           {status === 'loading' ? 'Searching…' : 'Search'}
         </button>
       </form>
 
       {status === 'rate-limited' && (
-        <p className="text-sm text-amber-700 dark:text-amber-400">Too many searches — try again shortly.</p>
+        <StatusPanel theme={{ ink: '#ffd76a', glow: 'rgba(255,215,106,.3)' }} size="sm" className="w-full p-3 text-center text-sm">
+          <p className="text-gold">Too many searches — try again shortly.</p>
+        </StatusPanel>
       )}
       {status === 'error' && (
-        <p className="text-sm text-red-600 dark:text-red-400">Something went wrong searching. Try again.</p>
+        <StatusPanel theme={{ ink: '#ff4d6a', glow: 'rgba(255,77,106,.28)' }} size="sm" className="w-full p-3 text-center text-sm">
+          <p className="text-danger-ink">Something went wrong searching. Try again.</p>
+        </StatusPanel>
       )}
 
       {status === 'ready' && (
         <ul className="flex w-full flex-col gap-4">
-          {results.length === 0 && <p className="text-center text-neutral-500">No matching candidates.</p>}
-          {results.map((r) => (
-            <li
-              key={r.candidate_id}
-              className="rounded-xl border border-neutral-200 bg-white p-4 text-left shadow-sm dark:border-neutral-800 dark:bg-neutral-900"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <a
-                  href={r.github_profile_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-medium underline underline-offset-2"
-                >
-                  {r.github_login}
-                </a>
-                <ScoreCounter score={r.average_score} className="text-lg" />
-              </div>
+          {results.length === 0 && <p className="text-ink-dim text-center">No matching candidates.</p>}
+          {results.map((r) => {
+            const overallRank = scoreToRank(r.average_score, 'verified')
+            return (
+              <StatusPanel key={r.candidate_id} as="li" theme={RANK_THEME[overallRank]} className="p-4 text-left">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="flex min-w-0 flex-1 items-center gap-3">
+                    <RankBadge rank={overallRank} size="sm" title={`Average rank ${overallRank}`} />
+                    <a
+                      href={r.github_profile_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="focus-visible:outline-accent min-w-0 truncate font-medium underline underline-offset-2 transition hover:opacity-70 active:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                    >
+                      {r.github_login}
+                    </a>
+                  </span>
+                  <ScoreCounter score={r.average_score} className="shrink-0 text-lg" />
+                </div>
 
-              {/* Each matched skill gets its own solid-vs-dashed treatment —
-                  the same evidence_type visual language as EvidenceCardTile —
-                  so a verified skill within the stack can't be mistaken for a
-                  declared_only one just because the overall average is decent. */}
-              <ul className="mt-2 flex flex-col gap-2">
-                {r.matches.map((m) => {
-                  const isWeak = isWeakEvidence(m.evidence_type)
-                  return (
-                    <li key={m.skill} className={evidenceCardClassName(isWeak)}>
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="flex items-center gap-2">
-                          <span className="font-medium">{m.skill}</span>
-                          <span className={evidenceBadgeClassName(m.evidence_type)}>
-                            {evidenceBadgeLabel(m.evidence_type)}
+                {/* Each matched skill gets its own lit-vs-dim treatment — the
+                    same evidence_type visual language as EvidenceCardTile —
+                    so a verified skill within the stack can't be mistaken for
+                    a declared_only one just because the overall average is
+                    decent. */}
+                <ul className="mt-3 flex flex-col gap-2">
+                  {r.matches.map((m) => {
+                    const isWeak = isWeakEvidence(m.evidence_type)
+                    const matchRank = scoreToRank(m.confidence_score, m.evidence_type)
+                    return (
+                      <StatusPanel key={m.skill} as="li" size="sm" theme={RANK_THEME[matchRank]} className={evidenceCardClassName(isWeak)}>
+                        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <RankBadge rank={matchRank} size="sm" />
+                            <span className="font-display font-semibold break-words">{m.skill}</span>
+                            <span className={evidenceBadgeClassName(m.evidence_type)}>
+                              {evidenceBadgeLabel(m.evidence_type)}
+                            </span>
                           </span>
-                        </span>
-                        <ScoreCounter score={m.confidence_score} className={`text-sm ${isWeak ? 'opacity-60' : ''}`} />
-                      </div>
-                      <p className={`mt-1 text-xs ${isWeak ? 'text-neutral-500' : 'text-neutral-600 dark:text-neutral-400'}`}>
-                        {evidenceTypeSummary(m.evidence_type)}
-                      </p>
-                    </li>
-                  )
-                })}
-              </ul>
+                          <ScoreCounter score={m.confidence_score} className="shrink-0 text-sm" />
+                        </div>
+                        <p className="text-ink-dim mt-1 text-xs">{evidenceTypeSummary(m.evidence_type)}</p>
+                      </StatusPanel>
+                    )
+                  })}
+                </ul>
 
-              <div className="mt-2 flex items-center justify-end text-xs text-neutral-500">
-                <Link to={`/c/${r.candidate_id}`} className="underline underline-offset-2">
-                  View Evidence Card
-                </Link>
-              </div>
-            </li>
-          ))}
+                <div className="text-ink-dim mt-3 flex items-center justify-end text-xs">
+                  <Link
+                    to={`/c/${r.candidate_id}`}
+                    className="text-accent-ink focus-visible:outline-accent underline underline-offset-2 transition hover:opacity-70 active:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                  >
+                    View Evidence Card
+                  </Link>
+                </div>
+              </StatusPanel>
+            )
+          })}
         </ul>
       )}
     </main>

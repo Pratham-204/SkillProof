@@ -24,9 +24,14 @@ export default function ScoreCounter({ score, className }: ScoreCounterProps) {
   }, [score, motionValue])
 
   // tabular-nums is load-bearing here: without it, digit width changes as
-  // the count-up runs and the number visibly jitters left/right.
+  // the count-up runs and the number visibly jitters left/right. Reads as a
+  // System readout: monospace glyphs, accent-lit, currentColor so a caller
+  // passing a dim/weak className (e.g. opacity-60) still dims the glow with it.
   return (
-    <span className={`font-mono tabular-nums ${className ?? ''}`}>
+    <span
+      className={`font-mono tabular-nums text-accent-ink ${className ?? ''}`}
+      style={{ textShadow: '0 0 12px currentColor' }}
+    >
       {display}
       <span className="text-[0.6em] opacity-60">%</span>
     </span>

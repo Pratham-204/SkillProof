@@ -38,8 +38,8 @@ export default function PublicEvidenceCard() {
   if (status === 'not-found' || !evidence) {
     return (
       <main className="mx-auto flex min-h-svh max-w-xl flex-col items-center justify-center gap-4 px-6 text-center">
-        <h1 className="font-wordmark text-3xl">Not found</h1>
-        <p className="text-neutral-500">No Evidence Card exists for this candidate.</p>
+        <h1 className="font-display text-3xl font-semibold tracking-wide">Not found</h1>
+        <p className="text-ink-dim">No Evidence Card exists for this candidate.</p>
       </main>
     )
   }
@@ -47,10 +47,9 @@ export default function PublicEvidenceCard() {
   return (
     <main className="mx-auto flex min-h-svh max-w-xl flex-col items-center justify-center gap-8 px-6 py-16 text-center">
       <div className="w-full">
-        <h1 className="font-wordmark mb-1 text-3xl">{evidence.github_login}</h1>
-        <p className="mb-6 text-sm text-neutral-500">
-          Verified against real GitHub activity — not a resume line.
-        </p>
+        <p className="text-accent mb-1 font-mono text-xs tracking-[0.3em]">[ HUNTER LICENSE ]</p>
+        <h1 className="font-display mb-1 text-3xl font-semibold tracking-wide break-words">{evidence.github_login}</h1>
+        <p className="text-ink-dim mb-6 text-sm">Verified against real GitHub activity — not a resume line.</p>
         <EvidenceCardList cards={evidence.cards} candidateId={evidence.candidate_id} />
       </div>
     </main>
