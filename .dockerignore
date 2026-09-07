@@ -14,6 +14,6 @@ skills-lock.json
 *.egg-info
 __pycache__
 **/__pycache__
-.env
+**/.env*
 frontend/node_modules
 frontend/dist

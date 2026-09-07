@@ -8,6 +8,7 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -22,12 +23,18 @@ jobs:
       # sentence-transformers downloads its model from the HuggingFace Hub the
       # first time it's used (most of test_scoring.py runs real embeddings,
       # per its own docstring) — cache it so CI isn't a slow, rate-limited
-      # re-download on every run.
+      # re-download on every run. Keyed off pyproject.toml (which pins the
+      # sentence-transformers version) so a dependency bump gets a fresh cache
+      # entry instead of reusing a stale one forever under a fixed key;
+      # restore-keys falls back to the closest prior cache to warm from when
+      # the exact key is new.
       - name: Cache HuggingFace model
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: huggingface-all-MiniLM-L6-v2
+          key: huggingface-all-MiniLM-L6-v2-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            huggingface-all-MiniLM-L6-v2-
 
       - name: Type check
         run: mypy src/skillproof
@@ -37,6 +44,7 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
@@ -61,8 +69,85 @@ jobs:
       - name: Test
         run: npm run test
 
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Folded in from the old standalone docker-smoke-test.yml: GitHub Actions
+    # `needs:` can't reference a job in a different workflow file, so a
+    # failure there could never actually block `deploy` below — only a job in
+    # this same file can.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: skillproof
+          POSTGRES_PASSWORD: skillproof
+          POSTGRES_DB: skillproof
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t skillproof:ci .
+
+      - name: Boot container
+        # Boots with a throwaway, CI-only production-shaped config (a
+        # real-format Fernet key, dummy GitHub OAuth creds, the postgres
+        # service above) instead of the permissive development defaults —
+        # production (Railway) never runs those defaults, so a smoke test
+        # that always exercised them proved little. --network host so the
+        # container can reach the postgres service on the runner's own
+        # localhost, same as this step's later curl does for port 8000.
+        run: |
+          fernet_key=$(openssl rand -base64 32 | tr '+/' '-_')
+          docker run -d --name skillproof-smoke --network host \
+            -e SKILLPROOF_ENVIRONMENT=production \
+            -e SKILLPROOF_TOKEN_ENCRYPTION_KEY="$fernet_key" \
+            -e SKILLPROOF_GITHUB_CLIENT_ID=ci-smoke-client-id \
+            -e SKILLPROOF_GITHUB_CLIENT_SECRET=ci-smoke-client-secret \
+            -e DATABASE_URL=postgresql://skillproof:skillproof@localhost:5432/skillproof \
+            skillproof:ci
+
+      - name: Wait for health check
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health >/dev/null; then
+              echo "Health check passed"
+              exit 0
+            fi
+            if ! docker inspect -f '{{.State.Running}}' skillproof-smoke 2>/dev/null | grep -q true; then
+              echo "::error::Container exited before becoming healthy"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::Health check never passed within the timeout"
+          exit 1
+
+      - name: Container logs
+        if: always()
+        run: docker logs skillproof-smoke || true
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f skillproof-smoke || true
+
   deploy:
-    needs: [backend, frontend]
+    needs: [backend, frontend, docker-smoke]
+    # Scoped to the ref so two overlapping pushes to main can't both reach
+    # `railway up` at once — without this, a slower older run finishing after
+    # a faster newer one would silently leave the older commit's build live.
+    # cancel-in-progress means the newer push wins outright instead of the
+    # two racing.
+    concurrency:
+      group: deploy-${{ github.ref }}
+      cancel-in-progress: true
     # A custom `if:` replaces the job's implicit default (`success()`)
     # entirely rather than ANDing with it, so success() must be spelled out
     # here — without it, this job would still run after a failed backend or
@@ -71,11 +156,17 @@ jobs:
     # enforced here instead, via this condition plus `needs:` above.
     if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned rather than left floating on latest so a Railway CLI release
+      # can't silently change deploy behavior mid-pipeline. Bump this
+      # deliberately (Dependabot's github-actions ecosystem only tracks
+      # `uses:` steps, not an npm package installed via `run:`, so this needs
+      # a manual version bump here when a newer CLI is wanted).
       - name: Install Railway CLI
-        run: npm install -g @railway/cli
+        run: npm install -g @railway/cli@5.49.3
 
       - name: Stamp the build with this commit
         # Overwrites the committed placeholder ("unknown") so the Dockerfile's
