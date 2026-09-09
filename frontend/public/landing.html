@@ -304,7 +304,7 @@
       <a href="#hunter-card">Hunter Card</a>
       <a href="#roadmap">Roadmap</a>
     </nav>
-    <a class="btn btn-primary" href="/auth/github/login">Connect GitHub</a>
+    <a class="btn btn-primary" href="/auth/github/login" id="nav-cta">Connect GitHub</a>
   </div>
 </header>
 
@@ -427,7 +427,7 @@
             <div class="row ctx">$ evidence_type = &quot;verified&quot;, score = 0.78</div>
           </div>
           <div class="cta-row" style="margin-top:24px;">
-            <a class="btn btn-primary" href="/auth/github/login">Open SkillProof</a>
+            <a class="btn btn-primary js-connect-cta" href="/auth/github/login">Open SkillProof</a>
           </div>
         </div>
         <div>
@@ -467,7 +467,7 @@
             <span class="tag">Download as PNG</span>
           </div>
           <div class="cta-row" style="margin-top:20px;">
-            <a class="btn btn-primary" href="/auth/github/login">Get my Hunter Card</a>
+            <a class="btn btn-primary js-connect-cta" href="/auth/github/login">Get my Hunter Card</a>
           </div>
         </div>
         <div>
@@ -559,12 +559,27 @@
 </footer>
 
 <script>
-  // Mirrors Home.tsx's own getMe() check: a returning, already-authenticated
-  // Candidate shouldn't have to read marketing copy every time they hit "/" —
-  // bounce them straight to their dashboard, same as the React app does.
+  // "/" always shows this marketing page now, even for a returning,
+  // already-authenticated Candidate (skillproof-landing-page-always-visible)
+  // — no more bouncing them to /dashboard on arrival. A signed-in visitor
+  // just doesn't need to be told to "Connect GitHub" they already have: the
+  // nav CTA swaps to a Dashboard link, and the two other pitch-page CTAs
+  // (which don't have room for a second label) are hidden outright, mirroring
+  // Home.tsx's own CTA-hiding behavior for the React landing page.
   fetch('/auth/github/me', { credentials: 'same-origin' })
-    .then(function (res) { if (res.ok) window.location.replace('/dashboard') })
-    .catch(function () {})
+    .then(function (res) {
+      if (!res.ok) return
+      var navCta = document.getElementById('nav-cta')
+      if (navCta) {
+        navCta.href = '/dashboard'
+        navCta.textContent = 'Dashboard'
+      }
+      var ctas = document.querySelectorAll('.js-connect-cta')
+      for (var i = 0; i < ctas.length; i++) ctas[i].hidden = true
+    })
+    .catch(function () {
+      console.error('landing.html: could not check sign-in state for CTA visibility')
+    })
 </script>
 </body>
 </html>
