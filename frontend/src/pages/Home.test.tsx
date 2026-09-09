@@ -14,7 +14,6 @@ function renderHome() {
     <MemoryRouter initialEntries={['/']}>
       <Routes>
         <Route path="/" element={<Home />} />
-        <Route path="/dashboard" element={<div>Dashboard page</div>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -25,7 +24,7 @@ beforeEach(() => {
 })
 
 describe('Home', () => {
-  it('redirects a logged-in candidate to the dashboard', async () => {
+  it('renders the landing page without the Connect GitHub CTA for a logged-in candidate', async () => {
     vi.mocked(api.getMe).mockResolvedValue({
       candidate_id: 'cand-1',
       github_login: 'octodev',
@@ -33,9 +32,10 @@ describe('Home', () => {
       needs_reconnect: false,
     })
 
-    const { findByText } = renderHome()
+    const { findByText, queryByText } = renderHome()
 
-    expect(await findByText('Dashboard page')).toBeInTheDocument()
+    expect(await findByText('SkillProof')).toBeInTheDocument()
+    expect(queryByText('Connect GitHub')).not.toBeInTheDocument()
   })
 
   it('shows the connect button for a logged-out visitor', async () => {
@@ -44,5 +44,13 @@ describe('Home', () => {
     const { findByText } = renderHome()
 
     expect(await findByText('Connect GitHub')).toBeInTheDocument()
+  })
+
+  it('does not show the connect button while the auth check is still in flight', () => {
+    vi.mocked(api.getMe).mockReturnValue(new Promise(() => {}))
+
+    const { queryByText } = renderHome()
+
+    expect(queryByText('Connect GitHub')).not.toBeInTheDocument()
   })
 })

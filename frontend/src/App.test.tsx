@@ -21,25 +21,19 @@ describe('App navigation chrome', () => {
     expect(await screen.findByRole('link', { name: /skillproof/i })).toHaveAttribute('href', '/')
   })
 
-  it('shows the same header wordmark for a logged-in candidate, even after the post-login redirect', async () => {
+  it('shows the same header wordmark for a logged-in candidate on the landing page', async () => {
     vi.mocked(api.getMe).mockResolvedValue({
       candidate_id: 'cand-1',
       github_login: 'octodev',
       searchable: false,
       needs_reconnect: false,
     })
-    vi.mocked(api.getEvidenceCard).mockResolvedValue({
-      candidate_id: 'cand-1',
-      github_login: 'octodev',
-      searchable: false,
-      needs_reconnect: false,
-      cards: [],
-    })
 
     render(<App />)
 
     expect(await screen.findByRole('link', { name: /skillproof/i })).toHaveAttribute('href', '/')
-    // Confirms the redirect this header must survive actually happened.
-    expect(window.location.pathname).toBe('/dashboard')
+    // "/" always renders the landing page now, even for a signed-in
+    // candidate (skillproof-landing-page-always-visible) — no redirect.
+    expect(window.location.pathname).toBe('/')
   })
 })
