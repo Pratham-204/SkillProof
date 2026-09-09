@@ -94,8 +94,15 @@ class Settings(BaseSettings):
     # Where a browser lands after GET /auth/github/callback sets its session
     # cookie. Relative by default since the frontend is served single-origin
     # by this same app (ADR-0006) — override only for a genuinely separate
-    # frontend origin during development.
-    github_oauth_success_redirect: str = "/"
+    # frontend origin during development. Points straight at the Candidate
+    # Dashboard rather than "/": "/" is always the marketing landing page now
+    # (skillproof-landing-page-always-visible), so a fresh login landing
+    # there instead of the dashboard would be a regression, not a detour.
+    # The two OAuth failure branches in callback() share this same setting —
+    # a failed login redirects to /dashboard too, and gets bounced back to
+    # "/" by the dashboard's own auth guard; that extra hop is accepted for
+    # now rather than adding a separate failure-redirect setting.
+    github_oauth_success_redirect: str = "/dashboard"
 
     @model_validator(mode="after")
     def _resolve_production_defaults(self) -> Self:

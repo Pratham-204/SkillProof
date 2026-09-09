@@ -208,6 +208,21 @@ def test_callback_rejects_a_state_that_does_not_match_the_cookie(client, fake_gi
     assert me.status_code == 401
 
 
+def test_successful_callback_redirects_straight_to_the_dashboard(client, fake_github):
+    """skillproof-landing-page-always-visible ticket 01: the OAuth success
+    redirect used to point at "/", relying on Home's own client-side redirect
+    to forward a signed-in visitor on to /dashboard. That client-side hop is
+    going away (ticket 02), so the callback itself must now redirect straight
+    to /dashboard."""
+    wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
+    state = _login_state(client)
+
+    response = client.get(f"/auth/github/callback?code=test-code&state={state}", follow_redirects=False)
+
+    assert response.status_code in (302, 307)
+    assert response.headers["location"] == "/dashboard"
+
+
 def test_toggle_searchable_updates_and_persists(client, fake_github):
     wire_verified_candidate(fake_github, login="octodev", github_user_id=42, code="test-code")
     connected = _connect(client)

@@ -1,3 +1,4 @@
+import logging
 import secrets
 
 from fastapi import APIRouter, Depends, Request
@@ -12,6 +13,8 @@ from skillproof.github_client import GitHubAuthError, GitHubClient
 from skillproof.limiter import limiter
 from skillproof.models import Candidate, CandidateSession
 from skillproof.schemas import CandidateOut, SearchableUpdate
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth/github", tags=["auth"])
 
@@ -90,6 +93,9 @@ def callback(
     # than exchange a code nothing has vouched for.
     cookie_state = request.cookies.get(OAUTH_STATE_COOKIE_NAME)
     if not cookie_state or not secrets.compare_digest(cookie_state, state):
+        logger.warning(
+            "OAuth callback rejected: state mismatch (cookie_present=%s)", cookie_state is not None
+        )
         response = RedirectResponse(settings.github_oauth_success_redirect)
         response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
         return response
@@ -104,11 +110,13 @@ def callback(
         # otherwise surface as a raw 500. Send the Candidate back into the app
         # instead, where "Connect GitHub Account" is safe to click again with a
         # fresh code.
+        logger.warning("OAuth callback rejected: code exchange with GitHub failed")
         response = RedirectResponse(settings.github_oauth_success_redirect)
         response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
         return response
 
     candidate = db.query(Candidate).filter_by(github_user_id=user.id).one_or_none()
+    is_new_candidate = candidate is None
     if candidate is None:
         candidate = Candidate(
             github_user_id=user.id,
@@ -130,6 +138,16 @@ def callback(
     session = CandidateSession(session_id=security.generate_session_token(), candidate_id=candidate.candidate_id)
     db.add(session)
     db.commit()
+
+    logger.info(
+        "OAuth callback succeeded: candidate_id=%s github_login=%s new_candidate=%s "
+        "previous_session_replaced=%s redirect=%s",
+        candidate.candidate_id,
+        candidate.github_login,
+        is_new_candidate,
+        previous_session is not None,
+        settings.github_oauth_success_redirect,
+    )
 
     response = RedirectResponse(settings.github_oauth_success_redirect)
     response.set_cookie(
